@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The portable scalar path: 100% safe Rust, every target. This is the arm every
+  # SIMD kernel is differential-tested against, so it is gated first and on all
+  # three platforms.
+  pure:
+    name: pure Rust scalar (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (no default features -- zero `unsafe` compiled in)
+        run: cargo build --workspace --no-default-features
+      - name: Test (no default features)
+        run: cargo test --workspace --no-default-features
+
+  # The SIMD path. Pure Rust intrinsics, no assembler and no build script, so
+  # every platform in the matrix runs the same kernels the release ships.
+  simd:
+    name: SIMD kernels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Default features ON: this is what `cargo add rusty_h265` gives you, and
+      # running CI on anything else institutionalises a blind spot.
+      - name: Test (default features)
+        run: cargo test --workspace --release
+      # The census counters have their own guards (every declared counter must
+      # actually be incremented), and they only compile under this feature.
+      - name: Test (census)
+        run: cargo test --workspace --release --features rusty_h265/census
+
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Documents, in CI, that the conformance corpus is NOT in the repo and the
+  # suite therefore skips it. Without this the green tick above could be read as
+  # "147/147 passed in CI", which it is not.
+  conformance-note:
+    name: conformance corpus (not vendored)
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "The JCT-VC HEVC_v1 suite is 381 MB and is not vendored here."
+          echo "Fetch it into hevc-vectors/ and run:"
+          echo "  HEVC_REQUIRE_VECTORS=1 cargo test --release"
+          echo "The jobs above skip it, and HEVC_REQUIRE_VECTORS makes that skip fatal."

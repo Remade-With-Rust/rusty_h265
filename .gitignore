@@ -1,0 +1,18 @@
+/target
+**/target
+Cargo.lock
+*.yuv
+*.hevc
+*.bit
+!tools/**/*.ps1
+
+# The JCT-VC HEVC_v1 conformance suite: 381 MB of streams, fetched separately.
+# The gate that reads it is tracked; the pixels are not.
+/hevc-vectors/
+
+# Junction to the shared skills folder; not part of this repo.
+.claude/skills/
+
+# Scratch target dirs used for --emit asm / ISA comparisons.
+target-asm*/
+target-native/

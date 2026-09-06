@@ -1,0 +1,44 @@
+# rusty_h265 -- a ground-up, pure-Rust HEVC/H.265 DECODER (Remade With Rust / Mata Network).
+#
+# Two crates, and the split is the safety boundary:
+#   crates/rusty_h265         the decoder. `#![forbid(unsafe_code)]`.
+#   crates/rusty_h265-accel   the SIMD kernels -- the ONE crate allowed `unsafe`,
+#                             behind a runtime-dispatched seam, every kernel
+#                             paired with the scalar twin it is tested against.
+[workspace]
+resolver = "2"
+members = ["crates/rusty_h265", "crates/rusty_h265-accel"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/rusty_h265"
+homepage = "https://www.mata.network/"
+authors = ["Mata Network"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+rusty_h265-accel = { path = "crates/rusty_h265-accel", version = "0.1.0", default-features = false }
+# The safe GlobalAlloc surface. OPTIONAL and binary-only: a library must never
+# hijack a downstream binary's allocator choice.
+rusty_alloc-api = "=1.1.6"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+panic = "abort"
+
+# Two clippy lints fire pervasively in the kernel crate, and both are wrong for
+# this domain rather than wrong in the code. They are allowed HERE, once, with
+# the reason written down -- so `-D warnings` stays on in CI and any NEW lint
+# kind is still a build failure.
+[workspace.lints.clippy]
+# A kernel signature is (src, stride, w, h, shift, dst, dst_stride, ...). Seven
+# is not a meaningful ceiling for a function whose arguments ARE the geometry;
+# bundling them into a struct would add a copy on the hot path to satisfy a lint.
+too_many_arguments = "allow"
+# In SIMD code the loop index is the address: it feeds `ptr.add(i * stride)` as
+# much as it indexes a slice, so an iterator rewrite obscures the arithmetic the
+# kernel exists to express.
+needless_range_loop = "allow"
