@@ -47,6 +47,25 @@ The `rusty_h265` binary is the conformance-harness front end:
 `rusty_h265 <in.bit> <out.yuv> [--verify-sei]` writes the cropped pictures as
 planar 4:2:0 (`u8`, or `u16` little-endian above 8 bits) in output order.
 
+## A faster build for modern CPUs
+
+The SIMD kernels already run AVX2 wherever the CPU allows -- they carry
+`#[target_feature]` and are selected at runtime. Everything **else**, roughly
+87% of decode time (entropy coding, syntax, per-block bookkeeping), compiles for
+the portable x86-64 baseline (SSE2), because the library has to build anywhere.
+Building for `x86-64-v3` lets that majority use AVX2, BMI2 and sixteen `ymm`
+registers as well:
+
+```sh
+RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release
+```
+
+Measured **1.066x**, bit-identical output, on both an x265-encoded 20-second
+720p30 clip (12/15, z = 2.32) and a JCT-VC conformance stream (14/15, z = 3.36).
+`x86-64-v3` needs AVX2 + BMI1/2 + FMA -- Haswell (2013) and later -- and will
+`SIGILL` on older hardware, so build it as a separate artifact from your portable
+one. CI gates the bit-exactness on every push.
+
 ## Conformance
 
 `cargo test -p rusty_h265 --release` runs the unit tests and, when

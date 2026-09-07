@@ -82,6 +82,34 @@ the 0.2.0 binary on the same box: **1.059x** on 720p 8-bit inter (19/21, z = 3.7
 (20/21, z = 4.15), and 1.018x all-intra (14/21, z = 1.53 -- not a verdict). This
 decoder started at 3,750 ms on the first row; it is 539 ms now.</sub>
 
+### A faster build for modern CPUs
+
+The SIMD kernels already run AVX2 wherever the CPU allows -- they carry
+`#[target_feature]` and are selected at runtime. Everything **else**, which is
+roughly 87% of decode time (entropy coding, syntax, per-block bookkeeping),
+compiles for the portable x86-64 baseline, i.e. SSE2, because the binary has to
+run anywhere.
+
+Building the whole decoder for `x86-64-v3` lets that majority use VEX encoding,
+three-operand forms and sixteen `ymm` registers as well:
+
+```sh
+RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release
+# or: tools/build-v3.sh   (toolsuild-v3.ps1 on Windows)
+```
+
+| stream | portable build | `x86-64-v3` | paired verdict |
+|---|---:|---:|---|
+| x265-encoded, 20 s 720p30 | 3,442 ms | **3,008 ms** | 1.066x, 12/15, z = 2.32 |
+| JCT-VC conformance | 367 ms | **344 ms** | 1.066x, 14/15, z = 3.36 |
+
+<sub>Same harness and method as the table above. Output is **bit-identical** to
+the portable build, and CI gates that on every push. `x86-64-v3` requires AVX2 +
+BMI1/2 + FMA -- Haswell (2013) and later, Excavator (2015) and later -- and will
+`SIGILL` on anything older, so it is a second artifact rather than a change to
+the default one. `-C target-cpu=native` is faster still on a newer machine, and
+is not distributable.</sub>
+
 ## What is this?
 
 A complete HEVC **decoder**, written from the specification:

@@ -50,6 +50,30 @@ jobs:
       - name: Test (census)
         run: cargo test --workspace --release --features rusty_h265/census
 
+  # The SECOND shipped artifact. The kernels are already AVX2 at runtime; this
+  # build lets the other ~87% of the decoder -- entropy, syntax, per-block
+  # bookkeeping -- use AVX2/BMI2 as well, worth a measured 1.066x. It is a
+  # separate binary because x86-64-v3 SIGILLs on pre-2013 hardware.
+  #
+  # What this job actually guards is that the faster build stays BIT-EXACT: a
+  # different instruction selection must not change a single decoded sample, and
+  # `-C target-cpu` is exactly the kind of flag that can (contraction, different
+  # rounding in anything floating point). The decoder is all-integer, so it must
+  # not -- and this is where we would find out.
+  v3:
+    name: x86-64-v3 build (bit-exact)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64-v3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (default features, x86-64-v3)
+        run: cargo test --workspace --release
+      - name: Test (no default features, x86-64-v3)
+        run: cargo test --workspace --release --no-default-features
+
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
