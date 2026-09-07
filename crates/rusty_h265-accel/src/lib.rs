@@ -33,6 +33,7 @@
 
 pub mod deblock;
 pub mod intra;
+pub mod itx;
 pub mod mc;
 pub mod pixel;
 pub mod sao;
@@ -44,6 +45,17 @@ pub enum Isa {
     Scalar,
     /// x86-64 baseline (SSE2) or aarch64 baseline (NEON) — always available.
     Baseline,
+    /// SSE4.1 (2007 and later on x86-64).
+    ///
+    /// A rung, not a rounding: the inverse-transform kernels need `pmulld`,
+    /// `pmovsxwd` and `pminsd`/`pmaxsd`, none of which exist in SSE2, and all
+    /// of which arrive here. Without this variant every pre-AVX2 machine took
+    /// the scalar twin for the whole transform.
+    ///
+    /// The ordering is load-bearing: kernels ask `isa() >= Isa::Sse41`, and the
+    /// `_` arm of an existing `match` on `Isa::Avx2` routes this to the SSE2
+    /// kernel, which is correct — SSE4.1 is a superset.
+    Sse41,
     /// AVX2 + FMA-era x86-64.
     Avx2,
 }
@@ -55,19 +67,43 @@ mod detect {
 
     static CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
 
+    fn probe() -> u8 {
+        // `RH265_ISA` caps the detected level: `scalar`, `baseline`, `sse41`.
+        //
+        // Without it the SSE4.1 rung could not be exercised on a developer
+        // machine that has AVX2, which is every machine here — and an arm no
+        // test can reach is an arm nobody has verified. This is the same reason
+        // every kernel keeps a `RH265_SCALAR_*` switch.
+        let cap = match std::env::var("RH265_ISA").as_deref() {
+            Ok("scalar") => 0,
+            Ok("baseline") | Ok("sse2") => 0,
+            Ok("sse41") => 1,
+            _ => 2,
+        };
+        let have = if std::is_x86_feature_detected!("avx2") {
+            2
+        } else if std::is_x86_feature_detected!("sse4.1") {
+            1
+        } else {
+            0
+        };
+        have.min(cap)
+    }
+
     pub fn isa() -> Isa {
         // Detected once; afterwards a relaxed byte load. Callers hoist this
         // above their loops regardless (see the module docs).
         match CACHE.load(Ordering::Relaxed) {
             0 => Isa::Baseline,
-            1 => Isa::Avx2,
+            1 => Isa::Sse41,
+            2 => Isa::Avx2,
             _ => {
-                let v = if std::is_x86_feature_detected!("avx2") { 1 } else { 0 };
+                let v = probe();
                 CACHE.store(v, Ordering::Relaxed);
-                if v == 1 {
-                    Isa::Avx2
-                } else {
-                    Isa::Baseline
+                match v {
+                    2 => Isa::Avx2,
+                    1 => Isa::Sse41,
+                    _ => Isa::Baseline,
                 }
             }
         }
@@ -103,6 +139,7 @@ pub fn isa() -> Isa {
 pub fn describe() -> &'static str {
     match isa() {
         Isa::Avx2 => "rusty_h265-accel: AVX2",
+        Isa::Sse41 => "rusty_h265-accel: SSE4.1",
         Isa::Baseline => {
             if cfg!(target_arch = "x86_64") {
                 "rusty_h265-accel: SSE2"
@@ -190,6 +227,20 @@ pub mod census {
         RT_MC_SHIFT0,
         RT_MC_SHIFTN,
         // Residual, by transform kind (§8.6.4) and size.
+        MC_FW_LT8,
+        MC_FW_8,
+        MC_FW_GE16,
+        INTRA_N_LT8,
+        INTRA_N_GE8,
+        PIX_W_LT8,
+        PIX_W_8,
+        PIX_W_GE16,
+        ITX_FUSED_SIMD,
+        ITX_FUSED_SCALAR,
+        ITX_SHIFT_SIMD,
+        ITX_SHIFT_SCALAR,
+        ITX_ACCUM_SIMD,
+        ITX_ACCUM_SCALAR,
         DEBLOCK_LUMA_SIMD,
         DEBLOCK_LUMA_SCALAR,
         RT_DEBLOCK_SKIP,
@@ -197,6 +248,16 @@ pub mod census {
         RT_DEBLOCK_WEAK,
         CABAC_BYPASS_CALLS,
         CABAC_BYPASS_BINS,
+        // CABAC bin populations, and the per-block work the residual
+        // parser does around them. These are the instruments for the CABAC
+        // campaign: every win below is a counter that goes down.
+        CABAC_CTX_BINS,
+        CABAC_TERM_BINS,
+        RES_BLOCKS,
+        RES_FILL_STORES,
+        RES_SCAN_SEARCH,
+        RES_SIG_SCANNED,
+        RES_SIG_CTX,
         MC_FIR_H_ROWS,
         RT_MC_VSYM,
         RT_MC_VGEN,
@@ -246,6 +307,15 @@ pub mod census {
         RT_PIC_10BIT,
         RT_PIC_8BIT,
     );
+
+    /// `true` only when the crate was built with the `census` feature.
+    ///
+    /// A `const`, so a bump guarded by it compiles away to nothing when it is
+    /// false. [`enabled`] cannot do that: its `OnceLock` read is an atomic load
+    /// plus a branch, which is fine per kernel call and is *itself* the cost
+    /// being measured on a path as hot as one CABAC bin. Instrument per-bin and
+    /// per-coefficient sites with this; use `enabled()` per block or coarser.
+    pub const ALWAYS: bool = cfg!(feature = "census");
 
     /// True when the counters should be updated. Read once and hoisted by the
     /// caller; the kernels themselves check a `const` in release builds where

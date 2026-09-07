@@ -4,6 +4,47 @@ All notable changes to `rusty_h265` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-07
+
+A performance release. Conformance is unchanged and still exact; the decoder is
+roughly a third of the way closer to ffmpeg than 0.1.0 was.
+
+### Performance
+
+- **1.3x-1.8x of ffmpeg 8.1.2**, from 1.5x-2.3x in 0.1.0, on the same harness
+  and the same box. The 720p 8-bit mainstream row went 781 ms -> 563 ms.
+- **The entropy coder and the syntax layer around it**: 53 measured,
+  individually gated changes. The largest were structural rather than clever --
+  the residual parser cleared a whole transform block when the
+  last-significant-coefficient position said a fraction of it was live (178.8 M
+  `i32` stores down to 67.3 M on intra-heavy content); two linear searches of
+  the scan tables became lookups; five per-block scan-table dispatches became
+  one; §6.4.1 availability was split so a block's own half is computed once
+  instead of once per neighbour; and `wrap_qp` stopped issuing a hardware
+  signed division on every coding unit.
+- **The inverse transform** gained a SIMD kernel and `i32` accumulators (the
+  `i64` ones were never needed -- the bound is 61,014,016 against `i32`'s 2.1 G).
+- **Deblocking** gained a kernel; the stage halved from 13.3% of decode to 6.5%.
+- Six candidate optimisations were measured and **rejected**, four of them the
+  same shape: masking away a bounds check trades a never-taken branch for a
+  bigger loop body.
+
+### Changed
+
+- `Contexts` now holds `[u8; CTX_PAD]` (256) rather than `[u8; NUM_CTX]` (157).
+  The padding makes `decode`'s index guard a single mask instead of a compare
+  and a conditional move, on a path that runs about four million times per 720p
+  frame-set. **This is the breaking change that makes this 0.2.0.**
+- `PicState` gains `avail_at` / `avail_n` / `avail_n_idx`, the split form of
+  `available`; `available` itself is unchanged and still present.
+- New `cabac-trace` feature (default off) carries the per-bin CABAC trace that
+  used to be a runtime flag, so no shipping decode pays for the branch.
+
+### Added
+
+- `rusty_h265-accel` gains `itx`, the inverse-transform kernel, which 0.1.0
+  shipped without.
+
 ## [0.1.0] - 2026-09-06
 
 First public release: a complete, conformance-verified HEVC decoder.

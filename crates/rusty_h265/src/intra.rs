@@ -205,7 +205,11 @@ pub fn predict(refs: &mut RefSamples, n: usize, mode: u8, c_idx: usize, bit_dept
         // the filter runs on some blocks and not others.
         let before = refs.corner;
         refs.filter(n, mode, bit_depth, strong_intra_smoothing);
-        accel::census::route(refs.corner != before, &accel::census::RT_INTRA_REF_FILTERED, &accel::census::RT_INTRA_REF_PLAIN);
+        // Compile-time gate: `route` reads a `OnceLock`, and this runs on
+        // every luma intra block -- 3.0 M of them on intra-heavy content.
+        if accel::census::ALWAYS {
+            accel::census::route(refs.corner != before, &accel::census::RT_INTRA_REF_FILTERED, &accel::census::RT_INTRA_REF_PLAIN);
+        }
     }
     let log2n = n.trailing_zeros() as usize;
     let max = (1i32 << bit_depth) - 1;
@@ -240,7 +244,9 @@ pub fn predict(refs: &mut RefSamples, n: usize, mode: u8, c_idx: usize, bit_dept
             // Flat only without the edge fix-ups below.
             // Route: fuse the flat DC into the residual add, or fill it.
             let defer = residual_follows && (c_idx != 0 || n >= 32);
-            accel::census::route(defer, &accel::census::RT_INTRA_DC_DEFERRED, &accel::census::RT_INTRA_DC_FILLED);
+            if accel::census::ALWAYS {
+                accel::census::route(defer, &accel::census::RT_INTRA_DC_DEFERRED, &accel::census::RT_INTRA_DC_FILLED);
+            }
             if defer {
                 return Some(dc as u16);
             }
@@ -271,7 +277,9 @@ pub fn predict(refs: &mut RefSamples, n: usize, mode: u8, c_idx: usize, bit_dept
             // Route: modes 18+ walk the top row (contiguous stores); below
             // 18 they walk the left column, which is a scatter and needs the
             // transposing kernel.
-            accel::census::route(mode >= 18, &accel::census::RT_INTRA_ANG_ROW, &accel::census::RT_INTRA_ANG_TRANSPOSED);
+            if accel::census::ALWAYS {
+                accel::census::route(mode >= 18, &accel::census::RT_INTRA_ANG_ROW, &accel::census::RT_INTRA_ANG_TRANSPOSED);
+            }
             let angle = INTRA_PRED_ANGLE[mode as usize];
             // ref[] indexed from -N..=2N via an offset of N. `i16` because the
             // kernel contracts two taps with one `pmaddwd`; the widest index

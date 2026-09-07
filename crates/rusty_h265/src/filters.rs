@@ -206,7 +206,10 @@ fn deblock(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, bs_v: &
                 let beta = (BETA_TABLE[qb as usize] as i32) << (bd_y - 8);
                 let qt = (qp + 2 * (b as i32 - 1) + ((f.tc_offset_div2 as i32) << 1)).clamp(0, 53);
                 let tc = (TC_TABLE[qt as usize] as i32) << (bd_y - 8);
-                accel::census::arm(&accel::census::RT_DEBLOCK_LUMA);
+                // Compile-time gate: this is the per-EDGE path.
+                if accel::census::ALWAYS {
+                    accel::census::arm(&accel::census::RT_DEBLOCK_LUMA);
+                }
                 let pl = &mut planes[0];
                 let (st_, mx) = (pl.stride, (1i32 << bd_y) - 1);
                 accel::deblock::luma_edge(&mut pl.data, st_, x4 * 4, y4 * 4, dir, beta, tc, no_p, no_q, mx);
@@ -214,7 +217,9 @@ fn deblock(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, bs_v: &
                 // Chroma: bS == 2 on the chroma 8-grid (the luma 16-grid).
                 let on_chroma_grid = if dir == 0 { x4 % 4 == 0 } else { y4 % 4 == 0 };
                 if b == 2 && on_chroma_grid {
-                    accel::census::arm(&accel::census::RT_DEBLOCK_CHROMA);
+                    if accel::census::ALWAYS {
+                        accel::census::arm(&accel::census::RT_DEBLOCK_CHROMA);
+                    }
                     for c in 1..3usize {
                         let off = if c == 1 { pps.cb_qp_offset } else { pps.cr_qp_offset };
                         let qpi = qp + off;
@@ -320,11 +325,13 @@ fn sao(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, scratch: &m
                 // `LS_B_Orange_4`, where the picture-level bypass flag means the
                 // band kernel runs exactly zero times — a counter that lies in
                 // the same way a never-incremented one does.
-                accel::census::arm(match prm.type_idx {
-                    0 => &accel::census::RT_SAO_OFF,
-                    1 => &accel::census::RT_SAO_BAND,
-                    _ => &accel::census::RT_SAO_EDGE,
-                });
+                if accel::census::ALWAYS {
+                    accel::census::arm(match prm.type_idx {
+                        0 => &accel::census::RT_SAO_OFF,
+                        1 => &accel::census::RT_SAO_BAND,
+                        _ => &accel::census::RT_SAO_EDGE,
+                    });
+                }
                 if prm.type_idx == 0 {
                     continue;
                 }
@@ -384,7 +391,9 @@ fn sao(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, scratch: &m
                 // The ring ALWAYS runs afterwards for an edge-offset CTB, so
                 // `RT_SAO_RING` counts CTBs that got no interior kernel at
                 // all (too small, or a bypass picture) — not ring samples.
-                accel::census::route(interior_ok && use_kernel, &accel::census::RT_SAO_INTERIOR, &accel::census::RT_SAO_RING);
+                if accel::census::ALWAYS {
+                    accel::census::route(interior_ok && use_kernel, &accel::census::RT_SAO_INTERIOR, &accel::census::RT_SAO_RING);
+                }
                 if interior_ok && use_kernel {
                     // The whole point of splitting interior from ring: no
                     // availability test, no bypass test, no clamp on the

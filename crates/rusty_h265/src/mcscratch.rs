@@ -49,8 +49,23 @@ impl McScratch {
         let left = (-x0).clamp(0, fw as i32) as usize;
         let right = ((x0 + fw as i32) - pw).clamp(0, fw as i32) as usize;
         let mid = fw - left - right;
+        // Rows above the picture all clamp to row 0, and rows below all clamp
+        // to the last one -- so a footprint hanging off an edge asked for the
+        // SAME output row several times over, rebuilding it each time: a clamp,
+        // a copy and up to two fills per repeat. Building it once and
+        // replicating is strictly less work, and blocks at a picture edge are
+        // 12% of motion compensation (`MC_EDGE_PAD` = 31,137 a clip).
+        let mut prev_sy = usize::MAX;
         for y in 0..fh {
             let sy = (y0 + y as i32).clamp(0, ph - 1) as usize;
+            if sy == prev_sy {
+                // `copy_within` on the flat buffer: the previous row is already
+                // exactly what this one would be.
+                let (a, b) = ((y - 1) * fw, y * fw);
+                self.pad.copy_within(a..a + fw, b);
+                continue;
+            }
+            prev_sy = sy;
             let row = &plane.data[sy * plane.stride..sy * plane.stride + plane.width];
             let out = &mut self.pad[y * fw..y * fw + fw];
             if mid > 0 {

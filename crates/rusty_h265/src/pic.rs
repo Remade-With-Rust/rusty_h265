@@ -88,6 +88,22 @@ pub struct PicState {
     pub ctb_filter: Vec<CtbFilterParams>,
 }
 
+/// The half of a §6.4.1 availability test that depends only on the CURRENT
+/// block: its z-scan order, slice address and tile id.
+///
+/// `PicState::available` recomputed all three on every neighbour query --
+/// `idx4` and `ctb_of` each scale by a runtime stride, so that is two
+/// multiplies and two loads -- and every caller asks about two or three
+/// neighbours of the SAME block. Hoisting the current-block half leaves the
+/// per-neighbour test with one multiply for `idx4`, one for `ctb_of`, and
+/// three compares.
+#[derive(Clone, Copy)]
+pub struct AvailAt {
+    zs: u32,
+    slice: i32,
+    tile: u32,
+}
+
 impl PicState {
     pub fn new(sps: &Sps, tiles: &TileLayout) -> Self {
         let width = sps.width as usize;
@@ -159,26 +175,65 @@ impl PicState {
         (y >> self.log2_ctb) * self.ctb_w + (x >> self.log2_ctb)
     }
 
-    /// §6.4.1: is the luma location (xn, yn) available for the block at (xc, yc)?
+    /// §6.4.1 availability, split: everything about the current block.
     #[inline]
-    pub fn available(&self, xc: i32, yc: i32, xn: i32, yn: i32) -> bool {
+    pub fn avail_at(&self, xc: i32, yc: i32) -> AvailAt {
+        let (xc, yc) = (xc as usize, yc as usize);
+        let cc = self.ctb_of(xc, yc);
+        AvailAt {
+            zs: self.zs[self.idx4(xc, yc)],
+            slice: self.slice_addr[cc],
+            tile: self.tile_id[cc],
+        }
+    }
+
+    /// [`avail_n`](Self::avail_n), returning the neighbour's 4x4 index.
+    ///
+    /// Every caller that finds a neighbour available then reads something at
+    /// it -- `ct_depth`, `pred_mode`, `qp_y`, `intra_mode`, `motion` -- and
+    /// recomputed `idx4(xn, yn)` to do so, a second multiply by the runtime
+    /// stride that `avail_n` had already performed and thrown away.
+    #[inline]
+    pub fn avail_n_idx(&self, a: &AvailAt, xn: i32, yn: i32) -> Option<usize> {
+        if xn < 0 || yn < 0 || xn >= self.width as i32 || yn >= self.height as i32 {
+            return None;
+        }
+        let i = self.idx4(xn as usize, yn as usize);
+        if self.zs[i] > a.zs {
+            return None;
+        }
+        let cn = self.ctb_of(xn as usize, yn as usize);
+        if self.slice_addr[cn] < 0 || self.slice_addr[cn] != a.slice || self.tile_id[cn] != a.tile {
+            return None;
+        }
+        if self.pred_mode[i] == PRED_NONE {
+            return None;
+        }
+        Some(i)
+    }
+
+    /// §6.4.1 availability, split: is (xn, yn) available to that block?
+    #[inline]
+    pub fn avail_n(&self, a: &AvailAt, xn: i32, yn: i32) -> bool {
         if xn < 0 || yn < 0 || xn >= self.width as i32 || yn >= self.height as i32 {
             return false;
         }
-        let (xn, yn, xc, yc) = (xn as usize, yn as usize, xc as usize, yc as usize);
-        if self.zs[self.idx4(xn, yn)] > self.zs[self.idx4(xc, yc)] {
+        let i = self.idx4(xn as usize, yn as usize);
+        if self.zs[i] > a.zs {
             return false;
         }
-        let cn = self.ctb_of(xn, yn);
-        let cc = self.ctb_of(xc, yc);
-        if self.slice_addr[cn] < 0 || self.slice_addr[cn] != self.slice_addr[cc] {
-            return false;
-        }
-        if self.tile_id[cn] != self.tile_id[cc] {
+        let cn = self.ctb_of(xn as usize, yn as usize);
+        if self.slice_addr[cn] < 0 || self.slice_addr[cn] != a.slice || self.tile_id[cn] != a.tile {
             return false;
         }
         // Decoded at all (a lost slice leaves PRED_NONE).
-        self.pred_mode[self.idx4(xn, yn)] != PRED_NONE
+        self.pred_mode[i] != PRED_NONE
+    }
+
+    /// §6.4.1: is the luma location (xn, yn) available for the block at (xc, yc)?
+    #[inline]
+    pub fn available(&self, xc: i32, yc: i32, xn: i32, yn: i32) -> bool {
+        self.avail_n(&self.avail_at(xc, yc), xn, yn)
     }
 
     /// Fills a rectangle (luma sample units) of a per-4×4 map.
@@ -187,10 +242,15 @@ impl PicState {
         let y0 = y >> 2;
         let x1 = (x + w).div_ceil(4);
         let y1 = (y + h).div_ceil(4);
+        // A row at a time, not an element at a time. The inner loop indexed the
+        // map per element, so every 4x4 cell carried its own bounds check; a
+        // row slice is checked once and then filled (a `memset` for the
+        // byte-sized maps). This runs eight to ten times per coding unit --
+        // `ct_depth`, `filter_bypass`, `pred_mode`, `intra_mode`, `qp_y`,
+        // `motion`, `nz` -- over the same rectangle each time.
         for yy in y0..y1 {
-            for xx in x0..x1 {
-                map[yy * w4 + xx] = v;
-            }
+            let r = yy * w4;
+            map[r + x0..r + x1].fill(v);
         }
     }
 }

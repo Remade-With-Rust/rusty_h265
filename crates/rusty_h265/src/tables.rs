@@ -59,6 +59,60 @@ pub static VERT_4X4: [(u8, u8); 16] = vert_scan::<4, 16>();
 pub static VERT_8X8: [(u8, u8); 64] = vert_scan::<8, 64>();
 static ONE: [(u8, u8); 1] = [(0, 0)];
 
+/// The inverse of a scan: `t[y * SIZE + x]` is the scan position of (x, y).
+const fn invert_scan<const SIZE: usize, const N: usize>(f: [(u8, u8); N]) -> [u8; N] {
+    let mut t = [0u8; N];
+    let mut i = 0;
+    while i < N {
+        let (x, y) = f[i];
+        t[(y as usize) * SIZE + x as usize] = i as u8;
+        i += 1;
+    }
+    t
+}
+
+/// Running bounding box of a scan prefix: `t[k]` is `(max_x + 1, max_y + 1)`
+/// over scan positions `0..=k`.
+const fn bbox_scan<const N: usize>(f: [(u8, u8); N]) -> [(u8, u8); N] {
+    let mut t = [(0u8, 0u8); N];
+    let (mut w, mut h) = (0u8, 0u8);
+    let mut i = 0;
+    while i < N {
+        let (x, y) = f[i];
+        if x + 1 > w {
+            w = x + 1;
+        }
+        if y + 1 > h {
+            h = y + 1;
+        }
+        t[i] = (w, h);
+        i += 1;
+    }
+    t
+}
+
+static INV_DIAG_2X2: [u8; 4] = invert_scan::<2, 4>(diag_scan::<2, 4>());
+static INV_DIAG_4X4: [u8; 16] = invert_scan::<4, 16>(diag_scan::<4, 16>());
+static INV_DIAG_8X8: [u8; 64] = invert_scan::<8, 64>(diag_scan::<8, 64>());
+static INV_HORIZ_2X2: [u8; 4] = invert_scan::<2, 4>(horiz_scan::<2, 4>());
+static INV_HORIZ_4X4: [u8; 16] = invert_scan::<4, 16>(horiz_scan::<4, 16>());
+static INV_HORIZ_8X8: [u8; 64] = invert_scan::<8, 64>(horiz_scan::<8, 64>());
+static INV_VERT_2X2: [u8; 4] = invert_scan::<2, 4>(vert_scan::<2, 4>());
+static INV_VERT_4X4: [u8; 16] = invert_scan::<4, 16>(vert_scan::<4, 16>());
+static INV_VERT_8X8: [u8; 64] = invert_scan::<8, 64>(vert_scan::<8, 64>());
+static INV_ONE: [u8; 1] = [0];
+
+static BBOX_DIAG_2X2: [(u8, u8); 4] = bbox_scan(diag_scan::<2, 4>());
+static BBOX_DIAG_4X4: [(u8, u8); 16] = bbox_scan(diag_scan::<4, 16>());
+static BBOX_DIAG_8X8: [(u8, u8); 64] = bbox_scan(diag_scan::<8, 64>());
+static BBOX_HORIZ_2X2: [(u8, u8); 4] = bbox_scan(horiz_scan::<2, 4>());
+static BBOX_HORIZ_4X4: [(u8, u8); 16] = bbox_scan(horiz_scan::<4, 16>());
+static BBOX_HORIZ_8X8: [(u8, u8); 64] = bbox_scan(horiz_scan::<8, 64>());
+static BBOX_VERT_2X2: [(u8, u8); 4] = bbox_scan(vert_scan::<2, 4>());
+static BBOX_VERT_4X4: [(u8, u8); 16] = bbox_scan(vert_scan::<4, 16>());
+static BBOX_VERT_8X8: [(u8, u8); 64] = bbox_scan(vert_scan::<8, 64>());
+static BBOX_ONE: [(u8, u8); 1] = [(1, 1)];
+
 /// `ScanOrder[log2BlockSize][scanIdx]` for block sizes 1, 2, 4, 8
 /// (scanIdx 0 = diagonal, 1 = horizontal, 2 = vertical).
 pub fn scan_order(log2_block_size: usize, scan_idx: usize) -> &'static [(u8, u8)] {
@@ -74,6 +128,114 @@ pub fn scan_order(log2_block_size: usize, scan_idx: usize) -> &'static [(u8, u8)
         (_, 1) => &HORIZ_8X8,
         (_, _) => &VERT_8X8,
     }
+}
+
+/// The inverse of [`scan_order`]: `t[y * size + x]` is the scan position of
+/// (x, y).
+///
+/// The residual parser needs exactly this, twice per transform block, to turn
+/// the decoded last-significant coordinate into a scan index. It used to search
+/// the forward table linearly — 13.5 tuple compares per block on a 720p stream
+/// and 5.0 per block over 3.0 M blocks on intra-heavy content, for a lookup
+/// that is one load.
+pub fn scan_inverse(log2_block_size: usize, scan_idx: usize) -> &'static [u8] {
+    match (log2_block_size, scan_idx) {
+        (0, _) => &INV_ONE,
+        (1, 0) => &INV_DIAG_2X2,
+        (1, 1) => &INV_HORIZ_2X2,
+        (1, _) => &INV_VERT_2X2,
+        (2, 0) => &INV_DIAG_4X4,
+        (2, 1) => &INV_HORIZ_4X4,
+        (2, _) => &INV_VERT_4X4,
+        (_, 0) => &INV_DIAG_8X8,
+        (_, 1) => &INV_HORIZ_8X8,
+        (_, _) => &INV_VERT_8X8,
+    }
+}
+
+/// `t[k] = (max_x + 1, max_y + 1)` over scan positions `0..=k` of
+/// [`scan_order`] — the bounding box of a scan prefix.
+///
+/// With `k = lastSubBlock` this is exactly the region of a transform block that
+/// can still receive a coefficient, which is how much of it needs clearing.
+pub fn scan_bbox(log2_block_size: usize, scan_idx: usize) -> &'static [(u8, u8)] {
+    match (log2_block_size, scan_idx) {
+        (0, _) => &BBOX_ONE,
+        (1, 0) => &BBOX_DIAG_2X2,
+        (1, 1) => &BBOX_HORIZ_2X2,
+        (1, _) => &BBOX_VERT_2X2,
+        (2, 0) => &BBOX_DIAG_4X4,
+        (2, 1) => &BBOX_HORIZ_4X4,
+        (2, _) => &BBOX_VERT_4X4,
+        (_, 0) => &BBOX_DIAG_8X8,
+        (_, 1) => &BBOX_HORIZ_8X8,
+        (_, _) => &BBOX_VERT_8X8,
+    }
+}
+
+/// Everything the residual parser needs about one (sub-block size, scanIdx)
+/// pair, selected once instead of five times.
+///
+/// `residual_block` used to call `scan_order` twice, `scan_inverse` twice and
+/// `scan_bbox` once -- five independent `match`es on the same two values, each
+/// emitting its own chain of compares and `cmov`s with a `lea` per candidate
+/// table. Three of those five were added by this campaign, so the per-block
+/// dispatch cost grew while the per-coefficient loops shrank. One indexed
+/// lookup replaces all five.
+pub struct ScanSet {
+    /// Sub-block scan, and its inverse and prefix bounding box.
+    pub sb: &'static [(u8, u8)],
+    pub sb_inv: &'static [u8],
+    pub sb_bbox: &'static [(u8, u8)],
+    /// The 4x4 within-sub-block scan and its inverse. Fixed-size on purpose:
+    /// a sub-block is always 4x4, so the length belongs in the type, and the
+    /// bounds check on `pos[n]` goes away for every scanned position.
+    pub pos: &'static [(u8, u8); 16],
+    pub pos_inv: &'static [u8; 16],
+}
+
+macro_rules! scan_set {
+    ($sb:ident, $inv:ident, $bb:ident, $pos:ident, $pinv:ident) => {
+        ScanSet {
+            sb: &$sb,
+            sb_inv: &$inv,
+            sb_bbox: &$bb,
+            pos: &$pos,
+            pos_inv: &$pinv,
+        }
+    };
+}
+
+/// `SCAN_SETS[log2SubBlockSize][scanIdx]`.
+static SCAN_SETS: [[ScanSet; 3]; 4] = [
+    [
+        scan_set!(ONE, INV_ONE, BBOX_ONE, DIAG_4X4, INV_DIAG_4X4),
+        scan_set!(ONE, INV_ONE, BBOX_ONE, HORIZ_4X4, INV_HORIZ_4X4),
+        scan_set!(ONE, INV_ONE, BBOX_ONE, VERT_4X4, INV_VERT_4X4),
+    ],
+    [
+        scan_set!(DIAG_2X2, INV_DIAG_2X2, BBOX_DIAG_2X2, DIAG_4X4, INV_DIAG_4X4),
+        scan_set!(HORIZ_2X2, INV_HORIZ_2X2, BBOX_HORIZ_2X2, HORIZ_4X4, INV_HORIZ_4X4),
+        scan_set!(VERT_2X2, INV_VERT_2X2, BBOX_VERT_2X2, VERT_4X4, INV_VERT_4X4),
+    ],
+    [
+        scan_set!(DIAG_4X4, INV_DIAG_4X4, BBOX_DIAG_4X4, DIAG_4X4, INV_DIAG_4X4),
+        scan_set!(HORIZ_4X4, INV_HORIZ_4X4, BBOX_HORIZ_4X4, HORIZ_4X4, INV_HORIZ_4X4),
+        scan_set!(VERT_4X4, INV_VERT_4X4, BBOX_VERT_4X4, VERT_4X4, INV_VERT_4X4),
+    ],
+    [
+        scan_set!(DIAG_8X8, INV_DIAG_8X8, BBOX_DIAG_8X8, DIAG_4X4, INV_DIAG_4X4),
+        scan_set!(HORIZ_8X8, INV_HORIZ_8X8, BBOX_HORIZ_8X8, HORIZ_4X4, INV_HORIZ_4X4),
+        scan_set!(VERT_8X8, INV_VERT_8X8, BBOX_VERT_8X8, VERT_4X4, INV_VERT_4X4),
+    ],
+];
+
+/// The scan tables for one transform block, in one lookup.
+///
+/// `log2sb` is `log2TrafoSize - 2` and so is 0..=3; `scan_idx` is 0..=2.
+#[inline]
+pub fn scan_set(log2sb: usize, scan_idx: usize) -> &'static ScanSet {
+    &SCAN_SETS[log2sb.min(3)][scan_idx.min(2)]
 }
 
 /// `transMatrix` column 0 = the unique DCT coefficient magnitudes at angles
@@ -115,6 +277,27 @@ pub static DCT32: [[i16; 32]; 32] = build_dct32();
 /// 4×4 DST-VII for intra luma 4×4 blocks (§8.6.4.2).
 pub static DST4: [[i16; 4]; 4] = [[29, 55, 74, 84], [74, 74, 0, -74], [84, -29, -74, 55], [55, -84, 74, -29]];
 
+/// [`DST4`] padded to 32-wide rows.
+///
+/// The inverse-transform kernel indexes `tab[k * tstep * 32]`, a pitch the DCT
+/// table has and the DST does not. Padding costs 224 bytes of `.rodata` and
+/// lets the 4-point DST use the same accumulate as everything else instead of
+/// keeping a scalar loop of its own. `dst4_padding_matches_dst4` pins the two
+/// together so an edit to one cannot drift from the other.
+pub static DST4_PAD: [[i16; 32]; 4] = {
+    let mut t = [[0i16; 32]; 4];
+    let mut k = 0;
+    while k < 4 {
+        let mut j = 0;
+        while j < 4 {
+            t[k][j] = DST4[k][j];
+            j += 1;
+        }
+        k += 1;
+    }
+    t
+};
+
 /// `intraPredAngle` by mode 2..=34 (Table 8-4); modes 0/1 are unused.
 pub static INTRA_PRED_ANGLE: [i32; 35] = [
     0, 0, 32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26, -32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32,
@@ -143,7 +326,77 @@ pub static TC_TABLE: [u8; 54] = [
 ];
 
 /// `ctxIdxMap` for `sig_coeff_flag` in 4×4 blocks (§9.3.4.2.5), index `(yC << 2) + xC`.
-pub static SIG_CTX_MAP_4X4: [u8; 16] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8];
+pub static SIG_CTX_MAP_4X4: [u8; 16] = SIG_MAP_4X4;
+const SIG_MAP_4X4: [u8; 16] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8];
+
+/// [`SIG_CTX_MAP_4X4`] re-keyed by SCAN POSITION rather than by (x, y):
+/// `SIG_CTX_4X4_BY_SCAN[scanIdx][n]`.
+///
+/// The significance loop walks `n` downward and needs nothing else from the
+/// position — so keying the map by `n` retires the two table loads and four
+/// adds/shifts that recovered (xC, yC) for every scanned position, 2.3 M of
+/// them on a 720p stream and 18.8 M on intra-heavy content.
+const fn sig_map_by_scan(f: [(u8, u8); 16]) -> [u8; 16] {
+    let mut t = [0u8; 16];
+    let mut i = 0;
+    while i < 16 {
+        let (x, y) = f[i];
+        t[i] = SIG_MAP_4X4[(y as usize) * 4 + x as usize];
+        i += 1;
+    }
+    t
+}
+pub static SIG_CTX_4X4_BY_SCAN: [[u8; 16]; 3] = [sig_map_by_scan(diag_scan::<4, 16>()), sig_map_by_scan(horiz_scan::<4, 16>()), sig_map_by_scan(vert_scan::<4, 16>())];
+
+/// `SIG_NB[scanIdx][prevCsbf][n]`: the 0/1/2 neighbour term of §9.3.4.2.5 for
+/// scan position `n` inside a 4x4 sub-block of a block larger than 4x4.
+///
+/// The spec writes this as a decision on `prevCsbf` and then on (xP, yP); as a
+/// nest of compares it ran up to four branches per scanned position. The whole
+/// thing is 192 bytes of constant, so it is one load.
+const fn sig_nb_one(f: [(u8, u8); 16], prev: usize) -> [u8; 16] {
+    let mut t = [0u8; 16];
+    let mut i = 0;
+    while i < 16 {
+        let (xp, yp) = (f[i].0 as usize, f[i].1 as usize);
+        t[i] = match prev {
+            0 => {
+                if xp + yp == 0 {
+                    2
+                } else if xp + yp < 3 {
+                    1
+                } else {
+                    0
+                }
+            }
+            1 => {
+                if yp == 0 {
+                    2
+                } else if yp == 1 {
+                    1
+                } else {
+                    0
+                }
+            }
+            2 => {
+                if xp == 0 {
+                    2
+                } else if xp == 1 {
+                    1
+                } else {
+                    0
+                }
+            }
+            _ => 2,
+        };
+        i += 1;
+    }
+    t
+}
+const fn sig_nb_set(f: [(u8, u8); 16]) -> [[u8; 16]; 4] {
+    [sig_nb_one(f, 0), sig_nb_one(f, 1), sig_nb_one(f, 2), sig_nb_one(f, 3)]
+}
+pub static SIG_NB: [[[u8; 16]; 4]; 3] = [sig_nb_set(diag_scan::<4, 16>()), sig_nb_set(horiz_scan::<4, 16>()), sig_nb_set(vert_scan::<4, 16>())];
 
 #[cfg(test)]
 mod tests {
@@ -206,5 +459,14 @@ mod tests {
         assert_eq!(CHROMA_QP_420[57], 51);
         assert_eq!(BETA_TABLE[51], 64);
         assert_eq!(TC_TABLE[53], 24);
+    }
+
+    /// The padded DST mirror must agree with the table it mirrors.
+    #[test]
+    fn dst4_padding_matches_dst4() {
+        for k in 0..4 {
+            assert_eq!(&DST4_PAD[k][..4], &DST4[k][..], "row {k}");
+            assert!(DST4_PAD[k][4..].iter().all(|&v| v == 0), "row {k} tail not zero");
+        }
     }
 }

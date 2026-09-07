@@ -329,6 +329,28 @@ mod x86 {
 
     #[target_feature(enable = "sse2")]
     unsafe fn fir_h_sse2_tail<const N: usize>(row: *const u16, t: &[i16; N], mut x: usize, w: usize, shift: u32, out: *mut i16) {
+        // A 4-wide step. This tail was fully scalar and serves EVERY row
+        // narrower than eight, so a 4-wide chroma block filtered its whole
+        // horizontal pass one sample at a time.
+        //
+        // `pmaddwd` on a contiguous load contracts adjacent tap pairs, giving
+        // the EVEN outputs; the same load offset by one gives the odd ones.
+        // Interleaving the low halves yields four consecutive outputs.
+        let shv = _mm_cvtsi32_si128(shift as i32);
+        while x + 4 <= w {
+            let mut even = _mm_setzero_si128();
+            let mut odd = _mm_setzero_si128();
+            for k in 0..N / 2 {
+                let tp = _mm_set1_epi32(pair(t, k));
+                even = _mm_add_epi32(even, _mm_madd_epi16(unsafe { _mm_loadu_si128(row.add(x + 2 * k) as *const __m128i) }, tp));
+                odd = _mm_add_epi32(odd, _mm_madd_epi16(unsafe { _mm_loadu_si128(row.add(x + 2 * k + 1) as *const __m128i) }, tp));
+            }
+            let even = _mm_sra_epi32(even, shv);
+            let odd = _mm_sra_epi32(odd, shv);
+            let v = _mm_unpacklo_epi32(even, odd);
+            unsafe { _mm_storel_epi64(out.add(x) as *mut __m128i, _mm_packs_epi32(v, v)) };
+            x += 4;
+        }
         while x < w {
             let mut acc = 0i32;
             for i in 0..N {
@@ -508,6 +530,35 @@ mod x86 {
             }
             for (o, yy) in [(out0, y), (out1, y + 1)] {
                 let mut x = nvec * 16;
+                // 8- and 4-wide steps before the scalar tail. This kernel
+                // stepped 16 and fell straight to scalar below that, so every
+                // chroma block -- routinely 4 or 8 wide in 4:2:0 -- filtered its
+                // vertical pass one sample at a time.
+                while x + 8 <= w {
+                    let mut lo = _mm_setzero_si128();
+                    let mut hi = _mm_setzero_si128();
+                    for k in 0..np {
+                        let r0 = unsafe { _mm_loadu_si128(src.add((yy + 2 * k) * stride + x) as *const __m128i) };
+                        let r1 = unsafe { _mm_loadu_si128(src.add((yy + 2 * k + 1) * stride + x) as *const __m128i) };
+                        let tp = _mm_set1_epi32(pair(t, k));
+                        lo = _mm_add_epi32(lo, _mm_madd_epi16(_mm_unpacklo_epi16(r0, r1), tp));
+                        hi = _mm_add_epi32(hi, _mm_madd_epi16(_mm_unpackhi_epi16(r0, r1), tp));
+                    }
+                    let (lo, hi) = if NOSHIFT { (lo, hi) } else { (_mm_sra_epi32(lo, sh), _mm_sra_epi32(hi, sh)) };
+                    unsafe { _mm_storeu_si128(o.add(x) as *mut __m128i, _mm_packs_epi32(lo, hi)) };
+                    x += 8;
+                }
+                if x + 4 <= w {
+                    let mut lo = _mm_setzero_si128();
+                    for k in 0..np {
+                        let r0 = unsafe { _mm_loadl_epi64(src.add((yy + 2 * k) * stride + x) as *const __m128i) };
+                        let r1 = unsafe { _mm_loadl_epi64(src.add((yy + 2 * k + 1) * stride + x) as *const __m128i) };
+                        lo = _mm_add_epi32(lo, _mm_madd_epi16(_mm_unpacklo_epi16(r0, r1), _mm_set1_epi32(pair(t, k))));
+                    }
+                    let lo = if NOSHIFT { lo } else { _mm_sra_epi32(lo, sh) };
+                    unsafe { _mm_storel_epi64(o.add(x) as *mut __m128i, _mm_packs_epi32(lo, lo)) };
+                    x += 4;
+                }
                 while x < w {
                     let mut acc = 0i32;
                     for i in 0..N {
@@ -540,6 +591,32 @@ mod x86 {
                 unsafe { _mm256_storeu_si256(out.add(x) as *mut __m256i, _mm256_packs_epi32(lo_acc, hi_acc)) };
             }
             let mut x = nvec * 16;
+            // The odd-row path needs the same steps as the two-row body above.
+            while x + 8 <= w {
+                let mut lo = _mm_setzero_si128();
+                let mut hi = _mm_setzero_si128();
+                for k in 0..np {
+                    let r0 = unsafe { _mm_loadu_si128(src.add((y + 2 * k) * stride + x) as *const __m128i) };
+                    let r1 = unsafe { _mm_loadu_si128(src.add((y + 2 * k + 1) * stride + x) as *const __m128i) };
+                    let tp = _mm_set1_epi32(pair(t, k));
+                    lo = _mm_add_epi32(lo, _mm_madd_epi16(_mm_unpacklo_epi16(r0, r1), tp));
+                    hi = _mm_add_epi32(hi, _mm_madd_epi16(_mm_unpackhi_epi16(r0, r1), tp));
+                }
+                let (lo, hi) = if NOSHIFT { (lo, hi) } else { (_mm_sra_epi32(lo, sh), _mm_sra_epi32(hi, sh)) };
+                unsafe { _mm_storeu_si128(out.add(x) as *mut __m128i, _mm_packs_epi32(lo, hi)) };
+                x += 8;
+            }
+            if x + 4 <= w {
+                let mut lo = _mm_setzero_si128();
+                for k in 0..np {
+                    let r0 = unsafe { _mm_loadl_epi64(src.add((y + 2 * k) * stride + x) as *const __m128i) };
+                    let r1 = unsafe { _mm_loadl_epi64(src.add((y + 2 * k + 1) * stride + x) as *const __m128i) };
+                    lo = _mm_add_epi32(lo, _mm_madd_epi16(_mm_unpacklo_epi16(r0, r1), _mm_set1_epi32(pair(t, k))));
+                }
+                let lo = if NOSHIFT { lo } else { _mm_sra_epi32(lo, sh) };
+                unsafe { _mm_storel_epi64(out.add(x) as *mut __m128i, _mm_packs_epi32(lo, lo)) };
+                x += 4;
+            }
             while x < w {
                 let mut acc = 0i32;
                 for i in 0..N {
@@ -741,6 +818,13 @@ mod x86 {
                 unsafe { _mm_storeu_si128(out.add(x) as *mut __m128i, _mm_sll_epi16(v, sh)) };
             }
             let mut x = nvec * 8;
+            // A 4-wide step: the full-pel copy of a 4-wide chroma block went
+            // one sample at a time.
+            if x + 4 <= w {
+                let v = unsafe { _mm_loadl_epi64(row.add(x) as *const __m128i) };
+                unsafe { _mm_storel_epi64(out.add(x) as *mut __m128i, _mm_sll_epi16(v, sh)) };
+                x += 4;
+            }
             while x < w {
                 unsafe { *out.add(x) = ((*row.add(x) as i32) << shift) as i16 };
                 x += 1;
@@ -921,7 +1005,7 @@ fn fir_h<const N: usize>(src: &[u16], stride: usize, t: &[i16; N], w: usize, h: 
         if src.len() >= stride * (h - 1) + w + N - 1 && dst.len() >= dst_stride * (h - 1) + w {
             // SAFETY: the lengths the kernels read and write are the ones
             // asserted immediately above.
-            match crate::isa() {
+            match plan().isa {
                 crate::Isa::Avx2 => return unsafe { x86::fir_h_avx2::<N>(src.as_ptr(), stride, t, w, h, shift, dst.as_mut_ptr(), dst_stride) },
                 _ => return unsafe { x86::fir_h_sse2::<N>(src.as_ptr(), stride, t, w, h, shift, dst.as_mut_ptr(), dst_stride) },
             }
@@ -952,17 +1036,42 @@ fn as_i16(s: &[u16]) -> &[i16] {
 /// True when the tap set is a palindrome, so the mirrored operands can be
 /// folded with a `paddw` before the multiply. Two of HEVC's filters are:
 /// luma `f2` and chroma `fC4`.
+///
+/// Used to build [`LUMA_SYM`] / [`CHROMA_SYM`] and to pin them in tests; the
+/// dispatch reads the table, because scanning the taps on every call is `N/2`
+/// comparisons for an answer that is a property of a compile-time constant.
+#[cfg(test)]
 fn palindromic<const N: usize>(t: &[i16; N]) -> bool {
     (0..N / 2).all(|k| t[k] == t[N - 1 - k])
 }
 
-/// Bring-up switch for the symmetric fold (`RH265_NO_SYM_FOLD=1` forces the
-/// general kernel). The arms are bit-identical, so this exists only to price
-/// the removed arithmetic.
-fn sym_fold() -> bool {
+/// Which filters are palindromic, by fractional position.
+///
+/// Pinned against the filters by `sym_tables_match_the_filters`.
+pub static LUMA_SYM: [bool; 4] = [false, false, true, false];
+pub static CHROMA_SYM: [bool; 8] = [false, false, false, false, true, false, false, false];
+
+/// The vector arm these kernels use, and whether the symmetric fold is on --
+/// one cached answer instead of an `isa()` probe and a `OnceLock` read on every
+/// call, on every dispatcher.
+///
+/// `Isa` is `Ord`, so callers ask `>= Isa::Sse41` or `== Isa::Avx2` against this
+/// rather than re-probing. `RH265_SCALAR_GATE` and `RH265_NO_SYM_FOLD` are
+/// folded in here for the same reason.
+#[derive(Clone, Copy)]
+struct McPlan {
+    isa: crate::Isa,
+    sym: bool,
+}
+
+#[inline(always)]
+fn plan() -> McPlan {
     use std::sync::OnceLock;
-    static OFF: OnceLock<bool> = OnceLock::new();
-    !*OFF.get_or_init(|| std::env::var_os("RH265_NO_SYM_FOLD").is_some())
+    static P: OnceLock<McPlan> = OnceLock::new();
+    *P.get_or_init(|| McPlan {
+        isa: crate::isa(),
+        sym: std::env::var_os("RH265_NO_SYM_FOLD").is_none(),
+    })
 }
 
 /// Pure-vertical FIR over PIXELS, taking the folded kernel when the taps are
@@ -973,24 +1082,38 @@ fn sym_fold() -> bool {
 /// runtime condition, not a formality -- the identical fold is unavailable to
 /// the 2-D path precisely because its operands are intermediates that already
 /// fill the type.
-fn fir_v_u16_sym<const N: usize>(src: &[u16], stride: usize, t: &[i16; N], w: usize, h: usize, shift: u32, bit_depth: u8, dst: &mut [i16], dst_stride: usize) {
+fn fir_v_u16_sym<const N: usize>(src: &[u16], stride: usize, t: &[i16; N], w: usize, h: usize, shift: u32, bit_depth: u8, sym: bool, dst: &mut [i16], dst_stride: usize) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
+        // `sym` is the caller's table lookup, not a scan of `t`, and the bounds
+        // expression is formed once rather than twice (it used to be computed
+        // for a `debug_assert` and again for the guard).
         let fits = src.len() >= stride * (h + N - 2) + w && dst.len() >= dst_stride * (h - 1) + w;
-        if crate::isa() == crate::Isa::Avx2 && fits && bit_depth <= 14 && sym_fold() && palindromic(t) {
-            // SAFETY: bounds checked just above; taps verified palindromic and
-            // the samples verified narrow enough for the i16 fold.
+        let p = plan();
+        if sym && p.sym && p.isa == crate::Isa::Avx2 && fits && bit_depth <= 14 {
+            // SAFETY: bounds checked just above; taps verified palindromic by
+            // the table and the samples verified narrow enough for the i16 fold.
             return unsafe { x86::fir_v_avx2_sym::<N>(as_i16(src).as_ptr(), stride, t, w, h, shift, dst.as_mut_ptr(), dst_stride) };
         }
+        // Straight to the general kernel: falling through `fir_v_u16` would
+        // probe the ISA a second time for a question already answered.
+        if fits {
+            // SAFETY: as above.
+            match p.isa {
+                crate::Isa::Avx2 => return unsafe { x86::fir_v_avx2::<N>(as_i16(src).as_ptr(), stride, t, w, h, shift, dst.as_mut_ptr(), dst_stride) },
+                crate::Isa::Scalar => {}
+                _ => return unsafe { x86::fir_v_sse2::<N>(as_i16(src).as_ptr(), stride, t, w, h, shift, dst.as_mut_ptr(), dst_stride) },
+            }
+        }
     }
-    let _ = bit_depth;
+    let _ = (bit_depth, sym);
     fir_v_u16::<N>(src, stride, t, w, h, shift, dst, dst_stride);
 }
 
 fn fir_v_u16<const N: usize>(src: &[u16], stride: usize, t: &[i16; N], w: usize, h: usize, shift: u32, dst: &mut [i16], dst_stride: usize) {
     #[cfg(feature = "simd")]
     {
-        if crate::isa() != crate::Isa::Scalar {
+        if plan().isa != crate::Isa::Scalar {
             return fir_v::<N>(as_i16(src), stride, t, w, h, shift, dst, dst_stride);
         }
     }
@@ -1004,7 +1127,7 @@ fn fir_v<const N: usize>(src: &[i16], stride: usize, t: &[i16; N], w: usize, h: 
     {
         if src.len() >= stride * (h + N - 2) + w && dst.len() >= dst_stride * (h - 1) + w {
             // SAFETY: the kernel reads `h + N - 1` rows of `w` and writes `h`.
-            match crate::isa() {
+            match plan().isa {
                 crate::Isa::Avx2 => return unsafe { x86::fir_v_avx2::<N>(src.as_ptr(), stride, t, w, h, shift, dst.as_mut_ptr(), dst_stride) },
                 _ => return unsafe { x86::fir_v_sse2::<N>(src.as_ptr(), stride, t, w, h, shift, dst.as_mut_ptr(), dst_stride) },
             }
@@ -1033,11 +1156,43 @@ fn elide_taps() -> bool {
     !*OFF.get_or_init(|| std::env::var_os("RH265_NO_TAP_ELIDE").is_some())
 }
 
-fn interp<const N: usize>(src: &[u16], stride: usize, fx: usize, fy: usize, w: usize, h: usize, bit_depth: u8, taps: &[[i16; N]], spans: &[(usize, usize)], dst: &mut [i16], tmp: &mut [i16]) {
+fn interp<const N: usize>(
+    src: &[u16],
+    stride: usize,
+    fx: usize,
+    fy: usize,
+    w: usize,
+    h: usize,
+    bit_depth: u8,
+    taps: &[[i16; N]],
+    spans: &[(usize, usize)],
+    syms: &[bool],
+    dst: &mut [i16],
+    tmp: &mut [i16],
+) {
     let m = margin(N);
     let shift1 = (bit_depth as u32).saturating_sub(8).min(4);
     let shift3 = (14u32).saturating_sub(bit_depth as u32).max(2);
-    if census::enabled() {
+    // ONE probe for the whole call. It was four on the 2-D path -- here, twice
+    // more inside that arm, and once again in `interp_luma` -- each a relaxed
+    // atomic load on a function that runs a quarter of a million times a clip.
+    let cen = census::enabled();
+    if cen {
+        // Width class of the FILTER call, weighted by samples. `fir_v` steps 16
+        // and falls to a scalar tail below that; chroma blocks are routinely 4
+        // wide.
+        census::bump(
+            if w < 8 {
+                &census::MC_FW_LT8
+            } else if w < 16 {
+                &census::MC_FW_8
+            } else {
+                &census::MC_FW_GE16
+            },
+            (w * h) as u64,
+        );
+    }
+    if cen {
         // Route: the fractional position the bitstream asked for. Four arms,
         // and the content picks — a stream from a full-pel-only encoder takes
         // the first on every block, one from a slow preset almost never does.
@@ -1052,13 +1207,13 @@ fn interp<const N: usize>(src: &[u16], stride: usize, fx: usize, fy: usize, w: u
         // arm, and only for the one palindromic filter -- so the population is
         // narrow by construction and the counter is what prices it.
         if fx == 0 && fy != 0 {
-            census::route(sym_fold() && palindromic(&taps[fy]), &census::RT_MC_VSYM, &census::RT_MC_VGEN);
+            census::route(plan().sym && syms[fy], &census::RT_MC_VSYM, &census::RT_MC_VGEN);
         }
     }
     match (fx, fy) {
         (0, 0) => copy_shift(&src[m * stride + m..], stride, w, h, shift3, dst, w),
         (fx, 0) => fir_h::<N>(&src[m * stride..], stride, &taps[fx], w, h, shift1, dst, w),
-        (0, fy) => fir_v_u16_sym::<N>(&src[m..], stride, &taps[fy], w, h, shift1, bit_depth, dst, w),
+        (0, fy) => fir_v_u16_sym::<N>(&src[m..], stride, &taps[fy], w, h, shift1, bit_depth, syms[fy], dst, w),
         (fx, fy) => {
             // Zero end taps: don't filter a row that gets multiplied by nothing.
             //
@@ -1088,11 +1243,9 @@ fn interp<const N: usize>(src: &[u16], stride: usize, fx: usize, fy: usize, w: u
             // constants, and the code was not reading it.
             let t = &taps[fy];
             let (lo, hi) = if elide_taps() { spans[fy] } else { (0, N - 1) };
-            if census::enabled() {
-                census::route(hi - lo < N - 1, &census::RT_MC_TAP_ELIDE, &census::RT_MC_TAP_FULL);
-            }
             let rows = h + hi - lo;
-            if census::enabled() {
+            if cen {
+                census::route(hi - lo < N - 1, &census::RT_MC_TAP_ELIDE, &census::RT_MC_TAP_FULL);
                 // The deterministic evidence for the elision: rows of horizontal
                 // filtering actually performed. The loop BODY is unchanged, so
                 // the instruction counter cannot see this win -- only the trip
@@ -1134,7 +1287,7 @@ pub fn interp_luma(src: &[u16], stride: usize, fx: usize, fy: usize, w: usize, h
             (w * h) as u64,
         );
     }
-    interp::<8>(src, stride, fx, fy, w, h, bit_depth, &LUMA_FILTER, &LUMA_SPAN, dst, tmp);
+    interp::<8>(src, stride, fx, fy, w, h, bit_depth, &LUMA_FILTER, &LUMA_SPAN, &LUMA_SYM, dst, tmp);
 }
 
 /// Chroma prediction block (4-tap, eighth-sample).
@@ -1156,7 +1309,7 @@ pub fn interp_chroma(src: &[u16], stride: usize, fx: usize, fy: usize, w: usize,
             (w * h) as u64,
         );
     }
-    interp::<4>(src, stride, fx, fy, w, h, bit_depth, &CHROMA_FILTER, &CHROMA_SPAN, dst, tmp);
+    interp::<4>(src, stride, fx, fy, w, h, bit_depth, &CHROMA_FILTER, &CHROMA_SPAN, &CHROMA_SYM, dst, tmp);
 }
 
 #[cfg(test)]
@@ -1356,5 +1509,21 @@ mod tests {
         let composite = (255 * (pos * pos + neg * neg)) >> 6;
         assert_eq!(composite, 33_150, "the header's adversarial bound");
         assert!(composite > i16::MAX as i32, "and it is outside i16, hence the conformance clause");
+    }
+
+    /// The symmetry tables must agree with the filters they describe.
+    ///
+    /// The dispatch reads these instead of scanning the taps, so a filter edit
+    /// that did not update them would silently take (or miss) the folded kernel.
+    #[test]
+    fn sym_tables_match_the_filters() {
+        for (i, f) in LUMA_FILTER.iter().enumerate() {
+            assert_eq!(palindromic(f), LUMA_SYM[i], "LUMA_SYM[{i}] disagrees with {f:?}");
+        }
+        for (i, f) in CHROMA_FILTER.iter().enumerate() {
+            assert_eq!(palindromic(f), CHROMA_SYM[i], "CHROMA_SYM[{i}] disagrees with {f:?}");
+        }
+        assert_eq!(LUMA_SYM.iter().filter(|&&b| b).count(), 1, "exactly one luma filter is a palindrome");
+        assert_eq!(CHROMA_SYM.iter().filter(|&&b| b).count(), 1, "exactly one chroma filter is a palindrome");
     }
 }

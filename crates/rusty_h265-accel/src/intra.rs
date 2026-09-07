@@ -365,6 +365,12 @@ mod x86 {
     /// As [`planar_sse2`].
     #[target_feature(enable = "avx2")]
     pub unsafe fn planar_avx2(dst: *mut u16, dst_stride: usize, n: usize, left: *const i16, top: *const i16, log2n: u32) {
+        // This kernel steps eight `i32`; the SSE2 twin steps four and so covers
+        // `n == 4`, which this one would send to its scalar tail.
+        if n < 8 {
+            // SAFETY: same footprint, narrower step.
+            return unsafe { planar_sse2(dst, dst_stride, n, left, top, log2n) };
+        }
         let tn = unsafe { *top.add(n) } as i32;
         let ln = unsafe { *left.add(n) } as i32;
         let sh = _mm_cvtsi32_si128(log2n as i32 + 1);
@@ -436,6 +442,14 @@ mod x86 {
                 unsafe { _mm_storeu_si128(row.add(i * 8) as *mut __m128i, v) };
             }
             let mut x = nvec * 8;
+            // A 4-wide store before the scalar tail. `nvec = n / 8`, so a 4x4
+            // block wrote its whole row one sample at a time -- and 4x4 is
+            // 28.4% of intra samples on intra-heavy content
+            // (`INTRA_N_LT8` = 49,728,768).
+            if x + 4 <= n {
+                unsafe { _mm_storel_epi64(row.add(x) as *mut __m128i, v) };
+                x += 4;
+            }
             while x < n {
                 unsafe { *row.add(x) = dc };
                 x += 1;
@@ -744,6 +758,9 @@ pub fn angular_i16_is_exact(max: i32) -> bool {
 }
 
 pub fn angular(dst: &mut [u16], dst_stride: usize, n: usize, refb: &[i16], off: usize, angle: i32, max: i32) {
+    if census::enabled() {
+        census::bump(if n < 8 { &census::INTRA_N_LT8 } else { &census::INTRA_N_GE8 }, (n * n) as u64);
+    }
     // The largest reference index this can touch is `off + n + (n*angle>>5) + 1`,
     // bounded by `off + 2n + 1`; the `+ 8` is the vector overread.
     let ok = (4..=MAX_N).contains(&n) && dst.len() >= dst_stride * (n - 1) + n && refb.len() >= off + 2 * n + 9 && angular_i16_is_exact(max);
@@ -799,6 +816,9 @@ pub fn angular_t(dst: &mut [u16], dst_stride: usize, n: usize, refb: &[i16], off
 
 /// Planar prediction (§8.4.4.2.5). `left` and `top` must hold `n + 1` samples.
 pub fn planar(dst: &mut [u16], dst_stride: usize, n: usize, left: &[i16], top: &[i16], log2n: u32) {
+    if census::enabled() {
+        census::bump(if n < 8 { &census::INTRA_N_LT8 } else { &census::INTRA_N_GE8 }, (n * n) as u64);
+    }
     let ok = (4..=MAX_N).contains(&n) && dst.len() >= dst_stride * (n - 1) + n && left.len() > n && top.len() > n;
     debug_assert!(ok);
     if census::enabled() {

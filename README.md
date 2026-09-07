@@ -48,22 +48,25 @@ Measured against **ffmpeg 8.1.2's native `hevc` decoder** -- hand-written
 assembly, the fastest widely-available software HEVC decoder, and a deliberately
 tougher bar than libde265.
 
-| stream | Mpx | ffmpeg 8.1.2 | **rusty_h265** | ratio |
-|---|---:|---:|---:|---:|
-| 720p 8-bit, mainstream inter | 55.3 | 359 ms | 781 ms | 0.44x |
-| 720p 10-bit, same content | 55.3 | 391 ms | 797 ms | 0.50x |
-| deblocking-heavy | 8.1 | 672 ms | 984 ms | 0.67x |
-| weighted prediction | 255.6 | 797 ms | 1,219 ms | 0.65x |
+| stream | Mpx | ffmpeg 8.1.2 | **rusty_h265** | ratio | paired verdict |
+|---|---:|---:|---:|---:|---|
+| 720p 8-bit, mainstream inter | 55.3 | 328 ms | 563 ms | 0.60x | 0/15, z = -3.87 |
+| 720p 10-bit, same content | 55.3 | 375 ms | 672 ms | 0.56x | 0/15, z = -3.87 |
+| deblocking-heavy | 331.8 | 781 ms | 1,313 ms | 0.58x | 0/15, z = -3.87 |
+| weighted prediction | 255.6 | 766 ms | 953 ms | 0.77x | 2/15, z = -2.84 |
 
-<sub>**We are 1.5x-2.3x slower than ffmpeg, and that is the honest number.**
-Measured 2026-09-06 with [`tools/bench/codec-bench.ps1`](tools/bench/codec-bench.ps1):
+<sub>**We are 1.3x-1.8x slower than ffmpeg, and that is the honest number.**
+Measured 2026-09-07 with [`tools/bench/codec-bench.ps1`](tools/bench/codec-bench.ps1):
 pinned to one core at High priority, **CPU time** (not elapsed), arms
-ABBA-alternated, 15 pairs, paired win-rate with a z-score -- every row above is
-0/15 with z = -3.87, so the gap is a verdict, not noise. Both arms discard their
-output, and **both arms' decoded frame counts are checked against `ffprobe`
-before any timing is reported**. The resolution floor -- ffmpeg measured against
-itself -- is **1.043x**. This decoder started at 3,750 ms on the first row; it is
-781 ms now.</sub>
+ABBA-alternated, 15 pairs, paired win-rate with a z-score -- every row is a
+verdict (|z| > 2), not noise. Both arms discard their output, and **both arms'
+decoded frame counts are checked against `ffprobe` before any timing is
+reported**. The resolution floor -- ffmpeg measured against itself -- is
+**0.955x**. This decoder started at 3,750 ms on the first row; it is 563 ms now.
+0.1.0 measured 0.44x-0.67x on the same harness, so the gap has closed by roughly
+a third. (The deblocking-heavy row is not comparable across the two releases:
+that stream was regenerated and is now 331.8 Mpx against 8.1 Mpx before. On the
+current stream, 0.2.0 is 1.079x faster than 0.1.0, 20/21, z = 4.15.)</sub>
 
 ## What is this?
 

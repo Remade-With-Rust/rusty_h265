@@ -237,7 +237,22 @@ impl CtbDiv {
 }
 
 pub(crate) fn wrap_qp(v: i32, qp_bd_offset: i32) -> i32 {
-    ((v + 52 + 2 * qp_bd_offset) % (52 + qp_bd_offset)) - qp_bd_offset
+    // The `%` here is a signed division by a RUNTIME divisor -- `idivl`, tens
+    // of cycles -- and it ran on every coding unit, not just the ones that code
+    // a `cu_qp_delta`.
+    //
+    // It never needs one. `qPY_PRED` is in `-off..=51` and `CuQpDeltaVal` is
+    // range-checked to `-(26 + off/2)..=25 + off/2` before it gets here, so the
+    // dividend lands in `0..2m` and the modulo can wrap at most twice. The loop
+    // is exactly `t % m` for `t >= 0`; for `-m < t < 0` truncated `%` also
+    // leaves `t` alone, so the two agree there as well.
+    let m = 52 + qp_bd_offset;
+    let mut t = v + 52 + 2 * qp_bd_offset;
+    debug_assert!(t > -m && t < 2 * m, "wrap_qp dividend {t} outside -m..2m (m = {m})");
+    while t >= m {
+        t -= m;
+    }
+    t - qp_bd_offset
 }
 
 impl<'a> SliceDecoder<'a> {
@@ -520,12 +535,11 @@ impl<'a> SliceDecoder<'a> {
             let bit_depth = if c == 0 { self.sps.bit_depth_luma } else { self.sps.bit_depth_chroma };
             let cmax = (1u32 << (bit_depth.min(10) - 5)) - 1;
             let mut abs = [0i32; 4];
+            // `sao_offset_abs` is truncated unary (§9.3.3.2), which is what
+            // `bypass_ones` decodes: one loop-invariant setup for the run
+            // instead of a fresh `scaled` shift and struct round-trip per bin.
             for a in abs.iter_mut() {
-                let mut v = 0;
-                while v < cmax && self.cab.bypass() == 1 {
-                    v += 1;
-                }
-                *a = v as i32;
+                *a = self.cab.bypass_ones(cmax) as i32;
             }
             let shift = bit_depth - bit_depth.min(10);
             if type_idx == 1 {
@@ -560,8 +574,9 @@ impl<'a> SliceDecoder<'a> {
         let split = if x0 + size <= w && y0 + size <= h && log2cb > min_cb {
             let xi = x0 as i32;
             let yi = y0 as i32;
-            let cond_l = self.st.available(xi, yi, xi - 1, yi) && self.st.ct_depth[self.st.idx4(x0 - 1, y0)] > depth;
-            let cond_a = self.st.available(xi, yi, xi, yi - 1) && self.st.ct_depth[self.st.idx4(x0, y0 - 1)] > depth;
+            let ac = self.st.avail_at(xi, yi);
+            let cond_l = matches!(self.st.avail_n_idx(&ac, xi - 1, yi), Some(i) if self.st.ct_depth[i] > depth);
+            let cond_a = matches!(self.st.avail_n_idx(&ac, xi, yi - 1), Some(i) if self.st.ct_depth[i] > depth);
             self.cab.decode(CTX_SPLIT_CU + cond_l as usize + cond_a as usize) == 1
         } else {
             log2cb > min_cb
@@ -583,15 +598,14 @@ impl<'a> SliceDecoder<'a> {
             let xi = x0 as i32;
             let yi = y0 as i32;
             let cur_ctb = self.st.ctb_of(x0, y0);
-            let qp_a = if self.st.available(xi, yi, xi - 1, yi) && self.st.ctb_of(x0 - 1, y0) == cur_ctb {
-                self.st.qp_y[self.st.idx4(x0 - 1, y0)] as i32
-            } else {
-                qp_prev
+            let ac = self.st.avail_at(xi, yi);
+            let qp_a = match self.st.avail_n_idx(&ac, xi - 1, yi) {
+                Some(i) if self.st.ctb_of(x0 - 1, y0) == cur_ctb => self.st.qp_y[i] as i32,
+                _ => qp_prev,
             };
-            let qp_b = if self.st.available(xi, yi, xi, yi - 1) && self.st.ctb_of(x0, y0 - 1) == cur_ctb {
-                self.st.qp_y[self.st.idx4(x0, y0 - 1)] as i32
-            } else {
-                qp_prev
+            let qp_b = match self.st.avail_n_idx(&ac, xi, yi - 1) {
+                Some(i) if self.st.ctb_of(x0, y0 - 1) == cur_ctb => self.st.qp_y[i] as i32,
+                _ => qp_prev,
             };
             self.qp_y_pred = (qp_a + qp_b + 1) >> 1;
         }
@@ -645,8 +659,9 @@ impl<'a> SliceDecoder<'a> {
         let yi = y0 as i32;
         let mut skip = false;
         if !self.sh.slice_type.is_intra() {
-            let cond_l = self.st.available(xi, yi, xi - 1, yi) && self.st.pred_mode[self.st.idx4(x0 - 1, y0)] == PRED_SKIP;
-            let cond_a = self.st.available(xi, yi, xi, yi - 1) && self.st.pred_mode[self.st.idx4(x0, y0 - 1)] == PRED_SKIP;
+            let ac = self.st.avail_at(xi, yi);
+            let cond_l = matches!(self.st.avail_n_idx(&ac, xi - 1, yi), Some(i) if self.st.pred_mode[i] == PRED_SKIP);
+            let cond_a = matches!(self.st.avail_n_idx(&ac, xi, yi - 1), Some(i) if self.st.pred_mode[i] == PRED_SKIP);
             skip = self.cab.decode(CTX_CU_SKIP + cond_l as usize + cond_a as usize) == 1;
         }
         self.qp_y = wrap_qp(self.qp_y_pred + self.cu_qp_delta_val, self.sps.qp_bd_offset_y);
@@ -779,13 +794,9 @@ impl<'a> SliceDecoder<'a> {
             let yp = y0 + (j >> 1) * pb;
             let cand = self.mpm_candidates(xp, yp);
             let mode = if prev[j] {
-                let idx = if self.cab.bypass() == 0 {
-                    0
-                } else if self.cab.bypass() == 0 {
-                    1
-                } else {
-                    2
-                };
+                // `mpm_idx` is truncated unary with cMax 2 -- the nested ifs
+                // were that binarisation written out, one `bypass()` per bin.
+                let idx = self.cab.bypass_ones(2) as usize;
                 cand[idx]
             } else {
                 let mut m = self.cab.bypass_bits(5) as u8;
@@ -825,11 +836,11 @@ impl<'a> SliceDecoder<'a> {
     fn mpm_candidates(&self, xp: usize, yp: usize) -> [u8; 3] {
         let xi = xp as i32;
         let yi = yp as i32;
+        let ac = self.st.avail_at(xi, yi);
         let cand = |xn: i32, yn: i32, above: bool| -> u8 {
-            if !self.st.available(xi, yi, xn, yn) {
+            let Some(i) = self.st.avail_n_idx(&ac, xn, yn) else {
                 return 1;
-            }
-            let i = self.st.idx4(xn as usize, yn as usize);
+            };
             if self.st.pred_mode[i] != PRED_INTRA {
                 return 1;
             }
@@ -894,16 +905,17 @@ impl<'a> SliceDecoder<'a> {
     }
 
     /// k-th order Exp-Golomb, bypass coded (§9.3.3.6).
-    pub(super) fn eg_k(&mut self, mut k: u32) -> Result<u32> {
-        let mut v = 0u32;
-        while self.cab.bypass() == 1 {
-            v += 1 << k;
-            k += 1;
-            if k > 31 {
-                return Err(Error::invalid("EGk prefix too long"));
-            }
+    pub(super) fn eg_k(&mut self, k: u32) -> Result<u32> {
+        // The prefix is a run of 1-bins; `bypass_ones` decodes the whole run
+        // with one loop-invariant setup, and `sum(1<<(k0+j))` over the run is
+        // closed form rather than an add per bin.
+        let room = 32 - k;
+        let m = self.cab.bypass_ones(room);
+        if m == room {
+            return Err(Error::invalid("EGk prefix too long"));
         }
-        Ok(v + self.cab.bypass_bits(k))
+        let v = ((1u32 << m) - 1) << k;
+        Ok(v + self.cab.bypass_bits(k + m))
     }
 }
 
