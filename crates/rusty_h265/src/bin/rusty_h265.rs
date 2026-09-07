@@ -30,14 +30,31 @@ fn main() {
         }
     };
     let headers_only = args.iter().any(|a| a == "--headers-only");
+    // `--pipe` writes the raw planar YUV to STDOUT, so a consumer can watch
+    // frames arrive as they are decoded. The stats line then goes to stderr --
+    // interleaved with the frame bytes it would corrupt the stream.
+    let pipe = args.iter().any(|a| a == "--pipe");
     let verify_sei = args.iter().any(|a| a == "--verify-sei");
     // `-` as the output path writes nothing: the decode-only arm, so a
     // measurement is not dominated by the YUV write (codec-measurement §4).
-    let mut out: Box<dyn Write> = if args[2] == "-" {
+    // `-` discards, so nothing needs serialising; `--pipe` and a real path do.
+    let serialize = pipe || args[2] != "-";
+    let mut out: Box<dyn Write> = if pipe {
+        Box::new(std::io::BufWriter::with_capacity(1 << 20, std::io::stdout()))
+    } else if args[2] == "-" {
         Box::new(std::io::sink())
     } else {
         Box::new(std::io::BufWriter::new(std::fs::File::create(&args[2]).expect("create output")))
     };
+    // Stage profiling is opt-in twice over: the `prof` feature must be built
+    // in, and the variable must be set. Neither the shipping binary nor an
+    // ordinary `--features prof` run pays anything until this line fires.
+    #[cfg(feature = "prof")]
+    let profiling = std::env::var_os("RH265_PROF").is_some();
+    #[cfg(feature = "prof")]
+    if profiling {
+        rusty_h265::prof::enable();
+    }
     let t0 = std::time::Instant::now();
     let mut dec = rusty_h265::Decoder::new();
     dec.headers_only = headers_only;
@@ -48,15 +65,15 @@ fn main() {
             dec.stats.errors += 1;
             first_err.get_or_insert_with(|| e.to_string());
         }
-        drain(&mut dec, &mut out);
+        drain(&mut dec, &mut out, serialize);
     }
     dec.flush();
-    let (w, h, bd) = drain(&mut dec, &mut out);
+    let (w, h, bd) = drain(&mut dec, &mut out, serialize);
     out.flush().expect("flush output");
     let ms = t0.elapsed().as_millis();
     let s = dec.stats;
     let first_sei = dec.sei_results.first().map_or("none", |r| if r.1 { "ok" } else { "bad" });
-    println!(
+    let line = format!(
         "frames={} errors={} decode_ms={} width={} height={} bit_depth={} pictures={} slices={} skipped_rasl={} generated_refs={} sei_checked={} sei_mismatch={} first_sei={} alloc={} isa={}",
         FRAMES.with(|f| f.get()),
         s.errors,
@@ -79,6 +96,16 @@ fn main() {
         if cfg!(feature = "bench-alloc") { "rusty" } else { "system" },
         rusty_h265::accel::describe().rsplit(": ").next().unwrap_or("?"),
     );
+    // Under `--pipe` stdout carries the frame bytes, so the stats go to stderr.
+    if pipe {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+    }
+    #[cfg(feature = "prof")]
+    if profiling {
+        eprint!("{}", rusty_h265::prof::report(t0.elapsed().as_nanos() as u64));
+    }
     if let Some(e) = first_err {
         eprintln!("first error: {e}");
     }
@@ -119,13 +146,24 @@ thread_local! {
     static FRAMES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-fn drain(dec: &mut rusty_h265::Decoder, out: &mut impl Write) -> (usize, usize, u8) {
+/// Drain every picture the decoder has ready.
+///
+/// `serialize` is false for the discard output (`-`). Draining is real decoder
+/// work -- it runs the DPB's bumping process and releases pictures -- but
+/// SERIALISING each one into a `Vec` that is then written to `io::sink()` is
+/// not: it was 1.38 MB of memcpy per frame, 830 MB over a 600-frame clip, on
+/// the path every published timing measures. `ffmpeg -f null -` does not do it
+/// either, so leaving it in was measuring us doing strictly more work than the
+/// arm we compare against (codec-measurement §4).
+fn drain(dec: &mut rusty_h265::Decoder, out: &mut impl Write, serialize: bool) -> (usize, usize, u8) {
     let mut geom = (0, 0, 0);
     let mut buf = Vec::new();
     while let Ok(frame) = dec.next_frame() {
-        buf.clear();
-        frame.write_yuv(&mut buf);
-        out.write_all(&buf).expect("write output");
+        if serialize {
+            buf.clear();
+            frame.write_yuv(&mut buf);
+            out.write_all(&buf).expect("write output");
+        }
         geom = (frame.width, frame.height, frame.bit_depth());
         FRAMES.with(|f| f.set(f.get() + 1));
     }

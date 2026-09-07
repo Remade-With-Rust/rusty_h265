@@ -118,6 +118,7 @@ impl<'a> SliceDecoder<'a> {
 
     /// Predicts the N×N block of component `c` at component coordinates (xb, yb).
     fn intra_predict(&mut self, c: usize, xb: usize, yb: usize, n: usize, mode: u8, residual_follows: bool) -> Option<u16> {
+        crate::prof_scope!(crate::prof::Stage::Intra);
         if self.ablate.intra {
             return None;
         }
@@ -516,6 +517,7 @@ impl<'a> SliceDecoder<'a> {
     /// §8.6.2–8.6.4 on `self.coeffs`, then adds the residual to the picture.
     #[allow(clippy::too_many_arguments)]
     fn reconstruct_residual(&mut self, x0: usize, y0: usize, log2: usize, c_idx: usize, transform_skip: bool, nz_w: usize, nz_h: usize, dc: Option<u16>) -> Result<()> {
+        crate::prof_scope!(crate::prof::Stage::Transform);
         if self.ablate.residual {
             return Ok(());
         }

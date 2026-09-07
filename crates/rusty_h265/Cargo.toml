@@ -27,6 +27,10 @@ census = ["rusty_h265-accel/census"]
 # is a `cfg` and not a runtime flag: as a runtime flag it cost a load, a test
 # and a branch on every one of ~4 M context bins per 720p frame-set.
 cabac-trace = []
+# The stage profiler (`RH265_PROF=1`). A feature, not a runtime flag, for the
+# same reason as `cabac-trace`: a scope guard is a clock read, and the stages it
+# wraps run millions of times a clip. Compiled out, every scope is nothing.
+prof = []
 
 [dependencies]
 # `default-features = false`: the ONLY route to the kernels is this crate's own

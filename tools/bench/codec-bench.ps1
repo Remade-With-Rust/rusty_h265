@@ -118,13 +118,24 @@ $RefExe = Resolve-Exe $Reference
 # ---- provenance --------------------------------------------------------------
 # Our binaries run under rusty_alloc in production, and an arm measured under the
 # system allocator is not comparable to what ships -- measured 1.133x apart on
-# this decoder. If the binary reports an allocator, it must be the shipping one.
-$probe = (& $OursExe $StreamList[0] "-" 2>&1 | Out-String)
-if ($probe -match "alloc=(\w+)") {
-    if ($Matches[1] -ne "rusty") {
-        throw "$OursExe reports alloc=$($Matches[1]); rebuild with the shipping allocator before publishing any number from it."
+# this decoder. If a binary reports an allocator, it must be the shipping one.
+#
+# BOTH arms, not just ours. This guard existed for `-Ours` only, and the arm it
+# did not check is exactly the one that went wrong: a release gate ran
+# `cargo test --release`, which relinks the same path WITHOUT `bench-alloc`, so
+# the 0.3.0 reference silently became a system-allocator build. Measured against
+# a rusty_alloc `-Ours` it manufactured 1.61x-2.20x at 15/15, z = 3.87 -- a
+# verdict-strength phantom, and the second time this exact trap has fired. An
+# arm nobody checks is an arm that is wrong.
+function Probe-Arm($exe, $label) {
+    $out = (& $exe $StreamList[0] "-" 2>&1 | Out-String)
+    if ($out -match "alloc=(\w+)" -and $Matches[1] -ne "rusty") {
+        throw "$label ($exe) reports alloc=$($Matches[1]); rebuild it with --features bench-alloc. Both arms must run the shipping allocator."
     }
+    return $out
 }
+$probe = Probe-Arm $OursExe "-Ours"
+$null = Probe-Arm $RefExe "-Reference"   # silently skipped for ffmpeg: it prints no alloc= line
 $isa = if ($probe -match "isa=(\w+)") { $Matches[1] } else { "?" }
 
 function Run-Pinned($exe, $argv) {

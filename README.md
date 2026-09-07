@@ -76,11 +76,20 @@ internal decode time (`decode_ms` here, `-benchmark rtime` for ffmpeg), which ha
 1 ms resolution and excludes process launch on both sides. The corrected method is
 LESS flattering to us, which is why it is the one we publish.</sub>
 
-<sub>Release over release, on the corrected harness and measured directly against
-the 0.2.0 binary on the same box: **1.059x** on 720p 8-bit inter (19/21, z = 3.71),
-**1.031x** deblocking-heavy (20/21, z = 4.15), **1.034x** weighted prediction
-(20/21, z = 4.15), and 1.018x all-intra (14/21, z = 1.53 -- not a verdict). This
-decoder started at 3,750 ms on the first row; it is 539 ms now.</sub>
+<sub>Release over release, measured directly against the previous binary on the
+same box with both arms under the shipping allocator: **0.4.0** is **1.155x** on an
+x265-encoded 20 s clip, **1.307x** deblocking-heavy and **1.111x** on conformance
+(15/15, z = 3.87 on each) over 0.3.0; 0.3.0 was 1.059x / 1.031x / 1.034x over
+0.2.0. This decoder started at 3,750 ms on the first row.</sub>
+
+<sub>0.4.0's two wins both came from the first run of the new stage profiler
+(`--features prof`, `RH265_PROF=1`), after roughly ninety wins had been landed on
+static instruction counts alone: the sequence-invariant scan tables were being
+rebuilt for every picture (a walk over all 57,600 4x4 blocks, 600 times), and the
+CLI was serialising every frame into a buffer it then discarded. Per-picture setup
+fell 13.7% -> 4.7% of decode; the untimed residue 8.5% -> 1.8%. The profile now
+reads: motion compensation 32%, entropy and syntax 17%, inverse transform 14%,
+deblocking 12%, SAO 9%.</sub>
 
 ### A faster build for modern CPUs
 

@@ -242,6 +242,7 @@ impl<'a> SliceDecoder<'a> {
     /// §7.3.8.6 prediction_unit() + §8.5.3 decoding: returns `merge_flag`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prediction_unit(&mut self, xcb: usize, ycb: usize, ncb: usize, xp: usize, yp: usize, w: usize, h: usize, part_idx: usize, depth: u8, skip: bool) -> Result<bool> {
+        crate::prof_scope!(crate::prof::Stage::Inter);
         let merge_idx = |s: &mut Self| -> usize {
             if s.sh.max_num_merge_cand <= 1 {
                 return 0;
@@ -714,6 +715,7 @@ impl<'a> SliceDecoder<'a> {
     /// overwhelming majority of blocks), and copies an edge-extended footprint
     /// into scratch when it is not (§8.5.3.3.2's coordinate clipping).
     fn motion_compensate(&mut self, xp: usize, yp: usize, w: usize, h: usize, pu: &PuMv) -> Result<()> {
+        crate::prof_scope!(crate::prof::Stage::Mc);
         if self.ablate.mc {
             return Ok(());
         }

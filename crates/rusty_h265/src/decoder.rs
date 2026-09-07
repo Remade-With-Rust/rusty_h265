@@ -126,6 +126,9 @@ pub struct Decoder {
     pending_pts: Option<i64>,
     /// A picture hash from a prefix SEI, for the next picture.
     pending_hash: Option<PictureHash>,
+    /// The sequence-invariant tables (`MinTbAddrZs`, the tile map), kept across
+    /// pictures. Rebuilt only when the SPS or the tile layout actually changes.
+    seq_tables: Option<crate::pic::SeqTables>,
     /// Verify every picture against its decoded-picture-hash SEI.
     pub verify_sei: bool,
     /// Stage ablation (ceiling probes); off unless the environment asks.
@@ -161,6 +164,7 @@ impl Decoder {
             skipping_picture: false,
             pending_pts: None,
             pending_hash: None,
+            seq_tables: None,
             verify_sei: false,
             ablate: Ablate::from_env(),
             sei_results: Vec::new(),
@@ -510,6 +514,10 @@ impl Decoder {
                 st_before.len() + st_after.len() + lt_curr.len()
             );
         }
+        // Per-picture setup: the frame buffers and every per-4x4 map. Timed
+        // because the first profile left ~22% of decode unaccounted for and
+        // this is the largest thing outside the CTU loop.
+        crate::prof_scope!(crate::prof::Stage::Dpb);
         let mut pic = Picture::new(sps.width as usize, sps.height as usize, sps.chroma_format_idc, sps.bit_depth_luma, sps.bit_depth_chroma);
         let (ow, oh) = sps.output_size();
         pic.crop = (
@@ -519,7 +527,21 @@ impl Decoder {
             oh as usize,
         );
         pic.poc = poc;
-        let state = PicState::new(&sps, &tiles);
+        // Sequence-invariant tables: reuse unless the SPS or tiles changed.
+        if !self.seq_tables.as_ref().is_some_and(|t| t.matches(&sps, &tiles)) {
+            self.seq_tables = Some(crate::pic::SeqTables::build(&sps, &tiles));
+        } else if std::env::var_os("RH265_SEQCHECK").is_some() {
+            // Diagnostic: rebuild anyway and report any field the key missed.
+            let fresh = crate::pic::SeqTables::build(&sps, &tiles);
+            let t = self.seq_tables.as_ref().unwrap();
+            if *fresh.zs != *t.zs {
+                eprintln!("SEQCHECK: zs differs on a cache HIT");
+            }
+            if *fresh.tile_id != *t.tile_id {
+                eprintln!("SEQCHECK: tile_id differs on a cache HIT");
+            }
+        }
+        let state = PicState::with_tables(&sps, self.seq_tables.as_ref().expect("just built"));
         let scaling = if sps.scaling_list_enabled {
             pps.scaling_list.as_ref().or(sps.scaling_list.as_ref()).map(ScalingFactors::new)
         } else {

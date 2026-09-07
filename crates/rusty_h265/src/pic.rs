@@ -57,7 +57,12 @@ pub struct PicState {
     pub ctb_w: usize,
     pub ctb_h: usize,
     /// `MinTbAddrZs` at 4×4 granularity.
-    pub zs: Vec<u32>,
+    ///
+    /// Shared, not owned: it is a function of the SPS and the tile layout only,
+    /// so it is identical for every picture in a coded video sequence. Built
+    /// per picture it cost a nested loop over every 4x4 in the frame -- 57,600
+    /// of them at 720p, 600 times over for a 600-picture clip.
+    pub zs: std::sync::Arc<[u32]>,
 
     /// Per CTB (raster): `SliceAddrRs` of the slice containing it, or -1.
     ///
@@ -72,8 +77,8 @@ pub struct PicState {
     pub slice_addr: Vec<i32>,
     /// Per CTB (raster): index into the picture's slice header list.
     pub ctb_slice: Vec<u16>,
-    /// Per CTB (raster): tile id.
-    pub tile_id: Vec<u32>,
+    /// Per CTB (raster): tile id. Shared for the same reason as [`zs`](Self::zs).
+    pub tile_id: std::sync::Arc<[u32]>,
     /// Per 4×4: `CuPredMode` (PRED_*).
     pub pred_mode: Vec<u8>,
     /// Per 4×4: luma intra prediction mode.
@@ -114,25 +119,42 @@ pub struct AvailAt {
     tile: u32,
 }
 
-impl PicState {
-    pub fn new(sps: &Sps, tiles: &TileLayout) -> Self {
-        let width = sps.width as usize;
-        let height = sps.height as usize;
-        let w4 = width.div_ceil(4);
-        let h4 = height.div_ceil(4);
+/// The sequence-invariant half of [`PicState`].
+///
+/// `MinTbAddrZs` and the raster-order tile map are functions of the SPS and the
+/// tile layout alone, so they are the same for every picture of a coded video
+/// sequence. Building them per picture put a nested loop over every 4x4 block
+/// in the frame on the per-picture path: measured at 13.7% of decode for the
+/// whole per-picture setup, of which this was the compute half.
+pub struct SeqTables {
+    pub zs: std::sync::Arc<[u32]>,
+    pub tile_id: std::sync::Arc<[u32]>,
+    /// What these were built from, so a cache can tell when they are stale.
+    ///
+    /// BOTH tile vectors, not just `rs_to_ts`. Keying on `rs_to_ts` alone looks
+    /// sufficient -- surely a different tile grid reorders the scan -- and is
+    /// not: `PPS_A_qualcomm_7` switches PPS to a layout with the SAME raster-to
+    /// -tile-scan map and a DIFFERENT tile numbering, so the cache hit, the
+    /// stale `tile_id` made `first_in_tile` wrong, and the parse died on
+    /// `end_of_subset_one_bit`. If a table is built from two inputs, key it on
+    /// two inputs.
+    key: (usize, usize, usize, usize, Vec<u32>, Vec<u32>),
+}
+
+impl SeqTables {
+    pub fn build(sps: &Sps, tiles: &TileLayout) -> SeqTables {
+        let w4 = (sps.width as usize).div_ceil(4);
+        let h4 = (sps.height as usize).div_ceil(4);
         let log2_ctb = sps.log2_ctb_size as usize;
         let ctb_w = sps.pic_width_in_ctbs as usize;
         let ctb_h = sps.pic_height_in_ctbs as usize;
-        let n4 = w4 * h4;
         let nctb = ctb_w * ctb_h;
-        // (6-10) at 4×4 granularity
-        let mut zs = vec![0u32; n4];
+        // (6-10) at 4x4 granularity.
+        let mut zs = vec![0u32; w4 * h4];
         let shift = log2_ctb - 2;
         for y in 0..h4 {
             for x in 0..w4 {
-                let tb_x = x >> shift;
-                let tb_y = y >> shift;
-                let ctb_rs = ctb_w * tb_y + tb_x;
+                let ctb_rs = ctb_w * (y >> shift) + (x >> shift);
                 let mut v = tiles.rs_to_ts[ctb_rs] << (shift * 2);
                 for i in 0..shift {
                     let m = 1usize << i;
@@ -150,6 +172,46 @@ impl PicState {
         for (rs, t) in tile_id.iter_mut().enumerate() {
             *t = tiles.tile_id[tiles.rs_to_ts[rs] as usize];
         }
+        SeqTables {
+            zs: zs.into(),
+            tile_id: tile_id.into(),
+            key: (w4, h4, log2_ctb, ctb_w, tiles.rs_to_ts.clone(), tiles.tile_id.clone()),
+        }
+    }
+
+    /// Whether these tables still describe this SPS and tile layout. Comparing
+    /// the two tile vectors is a walk over the CTBs -- 240 at 720p -- against
+    /// rebuilding, which walks every 4x4 block, 57,600 of them.
+    pub fn matches(&self, sps: &Sps, tiles: &TileLayout) -> bool {
+        self.key.0 == (sps.width as usize).div_ceil(4)
+            && self.key.1 == (sps.height as usize).div_ceil(4)
+            && self.key.2 == sps.log2_ctb_size as usize
+            && self.key.3 == sps.pic_width_in_ctbs as usize
+            && self.key.4 == tiles.rs_to_ts
+            && self.key.5 == tiles.tile_id
+    }
+}
+
+impl PicState {
+    /// The per-sequence half of `PicState`: everything derived from the SPS and
+    /// the tile layout, and therefore constant across the pictures that use
+    /// them. Built once by [`SeqTables::get`] and shared by every picture.
+    pub fn new(sps: &Sps, tiles: &TileLayout) -> Self {
+        Self::with_tables(sps, &SeqTables::build(sps, tiles))
+    }
+
+    /// Build a picture's state, taking the sequence-invariant tables as given.
+    pub fn with_tables(sps: &Sps, t: &SeqTables) -> Self {
+        let width = sps.width as usize;
+        let height = sps.height as usize;
+        let w4 = width.div_ceil(4);
+        let h4 = height.div_ceil(4);
+        let log2_ctb = sps.log2_ctb_size as usize;
+        let ctb_w = sps.pic_width_in_ctbs as usize;
+        let ctb_h = sps.pic_height_in_ctbs as usize;
+        let n4 = w4 * h4;
+        let nctb = ctb_w * ctb_h;
+        let (zs, tile_id) = (std::sync::Arc::clone(&t.zs), std::sync::Arc::clone(&t.tile_id));
         PicState {
             width,
             height,

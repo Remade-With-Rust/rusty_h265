@@ -138,6 +138,7 @@ fn edge_allowed(st: &PicState, pps: &Pps, cp: usize, cq: usize, lf_across_slices
 }
 
 fn deblock(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, bs_v: &mut Vec<u8>, bs_h: &mut Vec<u8>) {
+    crate::prof_scope!(crate::prof::Stage::Deblock);
     let w4 = st.w4;
     let h4 = st.h4;
     let bd_y = sps.bit_depth_luma;
@@ -372,6 +373,7 @@ fn scalar_sao() -> bool {
 ///   edge of a coding tree block can have an unusable neighbour. The interior
 ///   — which is all but `4·cs` of `cs²` samples — needs no check whatsoever.
 fn sao(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, scratch: &mut Vec<u16>, has_bypass: bool) {
+    crate::prof_scope!(crate::prof::Stage::Sao);
     // Hoisted once per picture: the kernels take a whole rectangle, so they are
     // only usable when no sample in the picture opts out of filtering.
     let use_kernel = !has_bypass && !scalar_sao();

@@ -4,6 +4,68 @@ All notable changes to `rusty_h265` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-07
+
+Conformance unchanged: 147/147 JCT-VC `HEVC_v1` bit-exact, SEI 100/100, on both
+the AVX2 and SSE4.1 rungs.
+
+### Added
+
+- **A stage profiler** (`prof` feature, `RH265_PROF=1`). Roughly ninety wins had
+  been landed using static instruction and guard-branch counts from the emitted
+  assembly. Those count *work removed*; they are not a map of *where the time
+  is*, and nothing had looked since the kernels landed. The report prints each
+  stage's call count and the profiler's own measured per-scope tax beside its
+  time, and flags any stage whose tax dominates it, because a profiler at
+  millions of calls is part of the system under test.
+- **An `x86-64-v3` build** (`tools/build-v3.{sh,ps1}`), measured 1.066x and
+  bit-exact, CI-gated. See 0.3.0's notes and the README.
+
+### Performance
+
+Measured against the 0.4.0 binary's 0.3.0 predecessor, both under the shipping
+allocator, both serialising, 15 pairs, ABBA-interleaved:
+
+| stream | 0.3.0 | 0.4.0 | ratio | verdict |
+|---|---:|---:|---:|---|
+| x265-encoded 20 s 720p30 | 3,554 ms | 3,136 ms | 1.155x | 15/15, z = 3.87 |
+| deblocking-heavy | 972 ms | 777 ms | 1.307x | 15/15, z = 3.87 |
+| JCT-VC conformance | 392 ms | 344 ms | 1.111x | 15/15, z = 3.87 |
+
+The profiler found both wins on its first run:
+
+- **The sequence-invariant tables were rebuilt for every picture.**
+  `MinTbAddrZs` and the raster-order tile map are functions of the SPS and the
+  tile layout alone, so they are identical for every picture of a coded video
+  sequence -- and building `MinTbAddrZs` walks every 4x4 block in the frame,
+  57,600 of them at 720p, 600 times over for a 600-picture clip. They are now
+  built once and shared. Per-picture setup fell from **13.7% of decode to 4.7%**.
+- **The CLI serialised every frame into a buffer it then discarded.** With `-`
+  as the output, `drain` still called `write_yuv` -- 1.38 MB of memcpy per
+  frame, 830 MB over a 600-frame clip -- and wrote it to `io::sink()`. That is
+  not decoding, `ffmpeg -f null -` does not do it either, and it was on the path
+  every published timing measures. The untimed residue fell from **8.5% to 1.8%**.
+
+Where the time goes now, on the 20-second clip: motion compensation 32%, entropy
+and syntax 17%, inverse transform 14%, deblocking 12%, SAO 9%, per-picture setup
+5%. The next structural item is the intermediate `pred` buffer in MC -- the
+interpolation writes `i16`, then `put_uni`/`put_bi` reads it back to write the
+picture, a whole pass that could be fused into the vertical filter.
+
+### Fixed -- the harness, again
+
+- **`-RefMsScale` had been reverted by a bad copy-back**, so the harness shipped
+  in 0.3.0 could not reproduce the ffmpeg table in its own README (ffmpeg's
+  `-benchmark` prints `rtime=0.198s`, which needs scaling to ms).
+- **The allocator guard checked only one arm.** Our binaries run under
+  `rusty_alloc` in production and a system-allocator build is not comparable;
+  the harness enforced that for `-Ours` and never for `-Reference`. A release
+  gate's `cargo test --release` had relinked the 0.3.0 reference without
+  `bench-alloc`, and the resulting mismatch manufactured **1.61x-2.20x at 15/15,
+  z = 3.87** -- verdict-strength, and entirely an artefact. It was caught only
+  because the profiler predicted 1.13x and the arithmetic did not agree. Both
+  arms are now checked. This is the second time this exact trap has fired.
+
 ## [0.3.0] - 2026-09-07
 
 A performance release, and a **correction to how we measure**. Conformance is

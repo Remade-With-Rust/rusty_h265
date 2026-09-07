@@ -462,6 +462,9 @@ impl<'a> SliceDecoder<'a> {
     }
 
     fn decode_ctu(&mut self, rs: usize, x0: usize, y0: usize) -> Result<()> {
+        // Per CTU, so `parse` is everything the entropy and syntax layer does
+        // for this CTU MINUS the stages timed separately inside it.
+        crate::prof_scope!(crate::prof::Stage::Parse);
         self.st.ctb_slice[rs] = self.slice_idx;
         self.st.ctb_filter[rs] = CtbFilterParams {
             deblock_disabled: self.sh.deblocking_filter_disabled,
