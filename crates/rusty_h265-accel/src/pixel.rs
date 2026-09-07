@@ -1598,3 +1598,40 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod bench_combine {
+    //! Prices the combine step, to decide whether fusing it into the
+    //! interpolation's final pass is worth three kernel variants per ISA rung.
+    //!
+    //! Not a `#[bench]`: run it explicitly.
+    //!   cargo test --release -p rusty_h265-accel -- --ignored --nocapture combine
+    use std::time::Instant;
+
+    /// Sizes weighted the way the census says a real clip uses them: 93% of
+    /// motion-compensated samples are in blocks 16 or wider, and every luma
+    /// block brings two chroma blocks at half its dimensions.
+    const SIZES: [(usize, usize, u64); 4] = [(32, 32, 3), (16, 16, 6), (16, 8, 3), (8, 8, 6)];
+
+    #[test]
+    #[ignore = "timing, not correctness"]
+    fn combine_cost() {
+        let bd = 8u8;
+        for (w, h, weight) in SIZES {
+            let src = vec![1234i16; w * h];
+            let mut dst = vec![0u16; w * h * 2];
+            let iters = 200_000u64;
+            // Warm.
+            for _ in 0..1000 {
+                super::put_uni(&mut dst, w, &src, w, h, bd);
+            }
+            let t = Instant::now();
+            for _ in 0..iters {
+                super::put_uni(&mut dst, w, &src, w, h, bd);
+                std::hint::black_box(&dst);
+            }
+            let ns = t.elapsed().as_nanos() as f64 / iters as f64;
+            println!("put_uni {w:>2}x{h:<2} weight {weight}  {ns:7.1} ns/call  {:5.2} ns/sample", ns / (w * h) as f64);
+        }
+    }
+}

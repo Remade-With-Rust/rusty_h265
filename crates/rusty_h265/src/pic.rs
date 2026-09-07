@@ -252,6 +252,12 @@ impl PicState {
     pub fn avail_at(&self, xc: i32, yc: i32) -> AvailAt {
         let (xc, yc) = (xc as usize, yc as usize);
         let cc = self.ctb_of(xc, yc);
+        // NOT `get_unchecked`. Measured: swapping this and the other hot
+        // per-4x4 map reads for unchecked indexing is 0.994x / 0.992x, 10/21,
+        // z = -0.22 -- a null. The per-SAMPLE loops are already `unsafe` inside
+        // `rusty_h265-accel`, so what `forbid(unsafe_code)` still covers here is
+        // per-BLOCK glue, run ~1.2 M times a clip against the kernels' ~700 M
+        // samples. The safety boundary is already where the cost is not.
         AvailAt {
             zs: self.zs[self.idx4(xc, yc)],
             slice: self.slice_addr[cc],

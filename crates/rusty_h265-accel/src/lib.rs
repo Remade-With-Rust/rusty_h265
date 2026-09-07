@@ -66,16 +66,39 @@ mod detect {
     use std::sync::atomic::{AtomicU8, Ordering};
 
     static CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
+    /// A cap set before first use, for harnesses that need to vary the ISA per
+    /// ARM. An env var cannot do that: both arms of a paired A/B run in the
+    /// same environment, so the comparison silently becomes a null arm.
+    static FORCED: AtomicU8 = AtomicU8::new(u8::MAX);
+
+    /// Cap the ISA. Must be called before the first kernel dispatch; later calls
+    /// are ignored, because the detected level is cached on first use.
+    pub fn force_cap(level: u8) {
+        FORCED.store(level, Ordering::Relaxed);
+        CACHE.store(u8::MAX, Ordering::Relaxed);
+    }
 
     fn probe() -> u8 {
-        // `RH265_ISA` caps the detected level: `scalar`, `baseline`, `sse41`.
+        // `RH265_ISA` caps the detected level: `baseline`/`sse2`, or `sse41`.
         //
         // Without it the SSE4.1 rung could not be exercised on a developer
         // machine that has AVX2, which is every machine here — and an arm no
         // test can reach is an arm nobody has verified. This is the same reason
         // every kernel keeps a `RH265_SCALAR_*` switch.
+        //
+        // `scalar` is REFUSED, loudly, and used to be accepted as a synonym for
+        // `baseline`. It is not one: level 0 is the SSE2 rung, so
+        // `RH265_ISA=scalar` ran vector kernels while announcing that it did
+        // not. Measured that way the vector path looked worth 3%; with the
+        // `simd` feature actually off it is worth **2.81x** (7,554 ms against
+        // 2,685 ms on a 20-second 720p clip). An arm that silently does not do
+        // what its name says is worse than no arm at all -- every conclusion
+        // drawn from it is wrong in the confident direction. The real scalar
+        // build is `--no-default-features`.
         let cap = match std::env::var("RH265_ISA").as_deref() {
-            Ok("scalar") => 0,
+            Ok("scalar") => {
+                panic!("RH265_ISA=scalar does not select the scalar kernels -- level 0 is the SSE2 rung.                  Build with --no-default-features for a genuinely scalar decoder.")
+            }
             Ok("baseline") | Ok("sse2") => 0,
             Ok("sse41") => 1,
             _ => 2,
@@ -87,7 +110,8 @@ mod detect {
         } else {
             0
         };
-        have.min(cap)
+        let forced = FORCED.load(Ordering::Relaxed);
+        have.min(cap).min(if forced == u8::MAX { u8::MAX } else { forced })
     }
 
     pub fn isa() -> Isa {
@@ -132,6 +156,22 @@ mod detect {
 #[inline]
 pub fn isa() -> Isa {
     detect::isa()
+}
+
+/// Cap the ISA programmatically, before the first kernel dispatch.
+///
+/// `RH265_ISA` caps it too, but an environment variable cannot vary per ARM:
+/// both arms of a paired A/B run in the same environment, so setting it turns
+/// the comparison into a null arm without saying so. A harness that wants to
+/// measure AVX2 against SSE4.1 needs this.
+pub fn force_isa(cap: Isa) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    detect::force_cap(match cap {
+        Isa::Scalar | Isa::Baseline => 0,
+        Isa::Sse41 => 1,
+        Isa::Avx2 => 2,
+    });
+    let _ = cap;
 }
 
 /// One line for a benchmark's method output, and for the reachability census:

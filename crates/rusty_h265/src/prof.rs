@@ -59,10 +59,14 @@ pub enum Stage {
     /// and the write into the picture. Nests inside `Inter`, whose remainder is
     /// then merge/AMVP derivation and the syntax around it.
     Mc,
+    /// The combine step alone: reading the `i16` prediction buffer back and
+    /// writing the picture. Nests inside `Mc`. Measured to price fusing it into
+    /// the interpolation's final pass.
+    Combine,
 }
 
-pub const N: usize = 8;
-const NAMES: [&str; N] = ["parse", "intra", "inter", "transform", "deblock", "sao", "dpb", "  |- mc"];
+pub const N: usize = 9;
+const NAMES: [&str; N] = ["parse", "intra", "inter", "transform", "deblock", "sao", "dpb", "  |- mc", "  |- combine"];
 /// Which stages run INSIDE `Parse`. `Parse` wraps a whole CTU, so its raw total
 /// includes prediction and transform; reporting all six as if they were
 /// siblings sums to 124% and prints a residue of zero, which is what the first
@@ -71,6 +75,9 @@ const NESTED_IN_PARSE: [Stage; 3] = [Stage::Intra, Stage::Inter, Stage::Transfor
 /// `Mc` nests inside `Inter`; it is reported as a breakdown line and must not
 /// be added to the column again.
 const NESTED_IN_INTER: [Stage; 1] = [Stage::Mc];
+/// `Combine` nests inside `Mc`; both are breakdown lines under `Inter` and
+/// neither is added to the column again.
+const NESTED_IN_MC: [Stage; 1] = [Stage::Combine];
 
 static NS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
 static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
@@ -163,6 +170,7 @@ pub fn report(total_ns: u64) -> String {
     let mut sum_tax = 0u64;
     let nested: u64 = NESTED_IN_PARSE.iter().map(|s| NS[*s as usize].load(Ordering::Relaxed)).sum();
     let in_inter: u64 = NESTED_IN_INTER.iter().map(|s| NS[*s as usize].load(Ordering::Relaxed)).sum();
+    let in_mc: u64 = NESTED_IN_MC.iter().map(|s| NS[*s as usize].load(Ordering::Relaxed)).sum();
     for i in 0..N {
         let raw = NS[i].load(Ordering::Relaxed);
         // `parse` is reported EXCLUSIVE of the stages nested inside it, so the
@@ -171,6 +179,8 @@ pub fn report(total_ns: u64) -> String {
             raw.saturating_sub(nested)
         } else if i == Stage::Inter as usize {
             raw.saturating_sub(in_inter)
+        } else if i == Stage::Mc as usize {
+            raw.saturating_sub(in_mc)
         } else {
             raw
         };

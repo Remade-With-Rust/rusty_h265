@@ -834,6 +834,11 @@ impl<'a> SliceDecoder<'a> {
                 }
             }
 
+            // NOT a profiler scope. Timing the combine step directly needs a
+            // scope on ~2 M calls a clip, and at 545 ns of measured per-scope
+            // cost that is 1,067 ms of tax against a 436 ms reading -- the
+            // instrument would be 2.4x the quantity. Priced by census and
+            // arithmetic instead (codec-measurement §6).
             let plane = &mut pic.planes[c];
             let stride = plane.stride;
             let off = yb * stride + xb;

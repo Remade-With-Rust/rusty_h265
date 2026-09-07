@@ -18,14 +18,40 @@ use std::io::Write;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: rusty_h265 <in.bit> <out.yuv> [--headers-only]");
+    // The two positional arguments are whatever is left after the flags, at
+    // whichever position they land.
+    //
+    // They used to be `args[1]` and `args[2]` outright. That works until a
+    // caller puts a flag first -- and one does: `conform.py --decoder "exe
+    // --isa sse41"` appends the input and output AFTER the decoder string, so
+    // the flag occupies the positional slots, the decoder tries to open
+    // `--isa` as a bitstream, and the suite reports 0/147. Which reads exactly
+    // like a decoder that has broken, on a change that touched no decoding.
+    let mut positional: Vec<&String> = Vec::new();
+    let mut skip_next = false;
+    for a in args.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == "--isa" {
+            skip_next = true; // `--isa <level>` takes a value
+            continue;
+        }
+        if a.starts_with("--") {
+            continue;
+        }
+        positional.push(a);
+    }
+    if positional.len() < 2 {
+        eprintln!("usage: rusty_h265 <in.bit> <out.yuv> [--headers-only] [--pipe] [--isa avx2|sse41|baseline]");
         std::process::exit(2);
     }
-    let data = match std::fs::read(&args[1]) {
+    let (in_path, out_path) = (positional[0].clone(), positional[1].clone());
+    let data = match std::fs::read(&in_path) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("read {}: {e}", args[1]);
+            eprintln!("read {in_path}: {e}");
             std::process::exit(2);
         }
     };
@@ -34,17 +60,31 @@ fn main() {
     // frames arrive as they are decoded. The stats line then goes to stderr --
     // interleaved with the frame bytes it would corrupt the stream.
     let pipe = args.iter().any(|a| a == "--pipe");
+    // `--isa sse41` caps the kernels for THIS process. The env var cannot do
+    // the job a paired A/B needs: both arms share an environment, so setting it
+    // there measures one configuration against itself.
+    if let Some(i) = args.iter().position(|a| a == "--isa") {
+        match args.get(i + 1).map(String::as_str) {
+            Some("sse41") => rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Sse41),
+            Some("baseline") | Some("sse2") => rusty_h265::accel::force_isa(rusty_h265::accel::Isa::Baseline),
+            Some("avx2") | None => {}
+            Some(other) => {
+                eprintln!("--isa: expected avx2, sse41 or baseline, got {other:?}");
+                std::process::exit(2);
+            }
+        }
+    }
     let verify_sei = args.iter().any(|a| a == "--verify-sei");
     // `-` as the output path writes nothing: the decode-only arm, so a
     // measurement is not dominated by the YUV write (codec-measurement §4).
     // `-` discards, so nothing needs serialising; `--pipe` and a real path do.
-    let serialize = pipe || args[2] != "-";
+    let serialize = pipe || out_path != "-";
     let mut out: Box<dyn Write> = if pipe {
         Box::new(std::io::BufWriter::with_capacity(1 << 20, std::io::stdout()))
-    } else if args[2] == "-" {
+    } else if out_path == "-" {
         Box::new(std::io::sink())
     } else {
-        Box::new(std::io::BufWriter::new(std::fs::File::create(&args[2]).expect("create output")))
+        Box::new(std::io::BufWriter::new(std::fs::File::create(&out_path).expect("create output")))
     };
     // Stage profiling is opt-in twice over: the `prof` feature must be built
     // in, and the variable must be set. Neither the shipping binary nor an

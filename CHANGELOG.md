@@ -4,6 +4,58 @@ All notable changes to `rusty_h265` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-09-07
+
+Conformance unchanged: 147/147 JCT-VC `HEVC_v1` bit-exact, SEI 100/100, on both
+the AVX2 and SSE4.1 rungs. No measurable performance change -- this release is
+about being able to trust the measurements.
+
+### Fixed
+
+- **The command line ignored flags that came before the paths.** The two
+  positional arguments were read as `argv[1]` and `argv[2]` outright, so
+  `rusty_h265 --isa sse41 in.bit out.yuv` tried to open `--isa` as a bitstream.
+  Flags are now skipped wherever they appear. This is how it surfaced: a
+  conformance run invoked as `--decoder "rusty_h265 --isa sse41"` reported
+  **0/147**, which looks exactly like a decoder that has broken, on a change
+  that touched no decoding.
+- **`RH265_ISA=scalar` did not select the scalar kernels.** Level 0 is the SSE2
+  rung and `scalar` was accepted as a synonym for `baseline`, so every "scalar"
+  arm ever run executed vector kernels while announcing that it did not.
+  Measured that way the whole vector path looked worth **3%**; with the `simd`
+  feature genuinely off it is worth **2.81x** (7,554 ms against 2,685 ms on a
+  20-second 720p clip). The variable now rejects `scalar` with a message
+  pointing at `--no-default-features`. An arm that silently does not do what its
+  name says is worse than no arm: every conclusion drawn from it is wrong, and
+  confidently so.
+
+### Added
+
+- **`--isa avx2|sse41|baseline`** on the CLI, and `rusty_h265_accel::force_isa`
+  behind it. `RH265_ISA` cannot do this job: both arms of a paired A/B run in
+  the same environment, so setting it turns the comparison into a null arm
+  without saying so -- the first attempt at measuring AVX2 against SSE4.1 did
+  exactly that and read 1.017x, z = 0.30. With the flag: **AVX2 is 1.045x over
+  SSE4.1** (14/15 z = 3.36, 15/15 z = 3.87).
+
+### Notes
+
+Two findings from this round, recorded here because they change what is worth
+doing next rather than what the code does:
+
+- **The kernels are worth 2.81x, and they are not width-limited.** Scalar ->
+  SSE4.1 is ~2.7x; SSE4.1 -> AVX2 is 1.045x. The earlier reading that AVX2 and
+  SSE4.1 are nearly equal was correct; the conclusion drawn from it -- "the
+  vector loops are not where the time is" -- was not. The correct reading is
+  that width above 128 bits buys almost nothing.
+- **`unsafe` would not help.** The decoder core is `#![forbid(unsafe_code)]`, so
+  the question is fair, and both probes are null: `panic = "abort"` measures
+  0.990x/1.006x, and converting the hottest per-4x4 map reads to `get_unchecked`
+  measures 0.994x/0.992x at 10/21, z = -0.22. The per-sample loops are already
+  unsafe inside `rusty_h265-accel`; what the guarantee still covers is per-block
+  glue entered ~1.2 M times a clip against the kernels' ~700 M samples. The
+  safety boundary is already drawn where the cost is not.
+
 ## [0.4.0] - 2026-09-07
 
 Conformance unchanged: 147/147 JCT-VC `HEVC_v1` bit-exact, SEI 100/100, on both
