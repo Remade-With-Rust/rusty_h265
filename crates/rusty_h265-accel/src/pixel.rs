@@ -27,6 +27,13 @@ fn scalar_gate() -> bool {
 // Scalar reference
 // ---------------------------------------------------------------------------
 
+/// `#[cold]`: the SIMD guard above it succeeds on every block of a conformant
+/// stream -- the `*_SCALAR` census counters read 0 across the corpus -- so this
+/// is the fallback for a shape the kernels decline, not a path decode takes.
+/// Inlined it padded the dispatcher, which IS on the hot path, with a body that
+/// never runs. Same reason `Cabac::refill_tail` is out of line.
+#[cold]
+#[inline(never)]
 fn put_uni_scalar(dst: &mut [u16], dst_stride: usize, src: &[i16], w: usize, h: usize, bit_depth: u8) {
     let shift = 14u32 - bit_depth as u32;
     let off = 1i32 << (shift - 1);
@@ -40,6 +47,13 @@ fn put_uni_scalar(dst: &mut [u16], dst_stride: usize, src: &[i16], w: usize, h: 
     }
 }
 
+/// `#[cold]`: the SIMD guard above it succeeds on every block of a conformant
+/// stream -- the `*_SCALAR` census counters read 0 across the corpus -- so this
+/// is the fallback for a shape the kernels decline, not a path decode takes.
+/// Inlined it padded the dispatcher, which IS on the hot path, with a body that
+/// never runs. Same reason `Cabac::refill_tail` is out of line.
+#[cold]
+#[inline(never)]
 fn put_bi_scalar(dst: &mut [u16], dst_stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, bit_depth: u8) {
     let shift = 15u32 - bit_depth as u32;
     let off = 1i32 << (shift - 1);
@@ -53,6 +67,13 @@ fn put_bi_scalar(dst: &mut [u16], dst_stride: usize, a: &[i16], b: &[i16], w: us
     }
 }
 
+/// `#[cold]`: the SIMD guard above it succeeds on every block of a conformant
+/// stream -- the `*_SCALAR` census counters read 0 across the corpus -- so this
+/// is the fallback for a shape the kernels decline, not a path decode takes.
+/// Inlined it padded the dispatcher, which IS on the hot path, with a body that
+/// never runs. Same reason `Cabac::refill_tail` is out of line.
+#[cold]
+#[inline(never)]
 fn add_residual_scalar(dst: &mut [u16], dst_stride: usize, res: &[i32], w: usize, h: usize, max: i32) {
     for y in 0..h {
         let row = &mut dst[y * dst_stride..y * dst_stride + w];
@@ -80,6 +101,11 @@ fn add_residual_scalar(dst: &mut [u16], dst_stride: usize, res: &[i32], w: usize
 /// exactly, for any `k >= 1`; and the clamp is a no-op because `s` is already a
 /// sample. So an integer motion vector with no weighting needs neither kernel —
 /// it needs a rectangle copy.
+// NOT `#[cold]`, unlike its siblings: `copy_block` has no vector path at all
+// -- a per-row `copy_from_slice` is already the best primitive -- so this is
+// the ONLY path, taken on every full-pel uni-predicted block. Outlining it
+// took `copy_block` from 56 instructions to 1, which is the tell: the work
+// moved behind a jump instead of leaving the hot path.
 fn copy_block_scalar(dst: &mut [u16], dst_stride: usize, src: &[u16], src_stride: usize, w: usize, h: usize) {
     for y in 0..h {
         dst[y * dst_stride..y * dst_stride + w].copy_from_slice(&src[y * src_stride..y * src_stride + w]);
@@ -96,6 +122,12 @@ fn copy_block_scalar(dst: &mut [u16], dst_stride: usize, src: &[u16], src_stride
 /// ```
 ///
 /// which is exactly what `pavgw` computes, in one instruction.
+/// `#[cold]`: the SIMD guard above it succeeds on every block of a conformant
+/// stream, so this is the fallback for a shape the kernels decline, not a path
+/// decode takes. Marked as a SET with its siblings: outlining ONE exit while
+/// others stay inlined buys the argument marshalling and none of the locality.
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn avg_block_scalar(dst: &mut [u16], dst_stride: usize, a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) {
     for y in 0..h {
@@ -120,6 +152,12 @@ fn avg_block_scalar(dst: &mut [u16], dst_stride: usize, a: &[u16], a_stride: usi
 /// Folding it removes a full pass over the block. The two remaining full-pel
 /// cases already collapse further: both lists full-pel is [`avg_block`], and
 /// uni-prediction is [`copy_block`].
+/// `#[cold]`: the SIMD guard above it succeeds on every block of a conformant
+/// stream, so this is the fallback for a shape the kernels decline, not a path
+/// decode takes. Marked as a SET with its siblings: outlining ONE exit while
+/// others stay inlined buys the argument marshalling and none of the locality.
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn put_bi_fp_scalar(dst: &mut [u16], dst_stride: usize, s: &[u16], s_stride: usize, b: &[i16], w: usize, h: usize, bit_depth: u8) {
     let k = 14i32 - bit_depth as i32;
@@ -147,6 +185,12 @@ fn put_bi_fp_scalar(dst: &mut [u16], dst_stride: usize, s: &[u16], s_stride: usi
 /// which needs neither the fill nor the load — one pass instead of two, and the
 /// predicted block never reaches memory. The caller only skips the fill when a
 /// residual is known to follow, so the two stay in step.
+/// `#[cold]`: the SIMD guard above it succeeds on every block of a conformant
+/// stream, so this is the fallback for a shape the kernels decline, not a path
+/// decode takes. Marked as a SET with its siblings: outlining ONE exit while
+/// others stay inlined buys the argument marshalling and none of the locality.
+#[cold]
+#[inline(never)]
 fn add_residual_const_scalar(dst: &mut [u16], dst_stride: usize, dc: u16, res: &[i32], w: usize, h: usize, max: i32) {
     for y in 0..h {
         for x in 0..w {
@@ -164,6 +208,12 @@ fn add_residual_const_scalar(dst: &mut [u16], dst_stride: usize, dc: u16, res: &
 /// and `denom ≤ 7`, and the rounding term is at most `2^12`. Pairing `(x, 1)`
 /// against `(w, round)` therefore computes `x·w + round` exactly in one
 /// instruction, which is what makes this worth vectorising at all.
+/// `#[cold]`: the SIMD guard above it succeeds on every block of a conformant
+/// stream, so this is the fallback for a shape the kernels decline, not a path
+/// decode takes. Marked as a SET with its siblings: outlining ONE exit while
+/// others stay inlined buys the argument marshalling and none of the locality.
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn weighted_uni_scalar(dst: &mut [u16], dst_stride: usize, src: &[i16], w: usize, h: usize, wt: i32, off: i32, log2wd: i32, max: i32) {
     for y in 0..h {
@@ -181,6 +231,12 @@ fn weighted_uni_scalar(dst: &mut [u16], dst_stride: usize, src: &[i16], w: usize
 ///
 /// Interleaving the two predictions puts `x` and `z` in adjacent lanes, so a
 /// single `pmaddwd` against `(w0, w1)` is the whole weighted sum.
+/// `#[cold]`: the SIMD guard above it succeeds on every block of a conformant
+/// stream, so this is the fallback for a shape the kernels decline, not a path
+/// decode takes. Marked as a SET with its siblings: outlining ONE exit while
+/// others stay inlined buys the argument marshalling and none of the locality.
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn weighted_bi_scalar(dst: &mut [u16], dst_stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, w0: i32, w1: i32, obias: i32, log2wd: i32, max: i32) {
     for y in 0..h {
@@ -202,6 +258,12 @@ fn weighted_bi_scalar(dst: &mut [u16], dst_stride: usize, a: &[i16], b: &[i16], 
 /// This is the Great Gate's decoder rule in one function: a population of
 /// streams served by a slow path is a missing kernel, and the population is
 /// what tells you it exists — the site looks cold from any single stream.
+/// `#[cold]`: the SIMD guard above it succeeds on every block of a conformant
+/// stream, so this is the fallback for a shape the kernels decline, not a path
+/// decode takes. Marked as a SET with its siblings: outlining ONE exit while
+/// others stay inlined buys the argument marshalling and none of the locality.
+#[cold]
+#[inline(never)]
 fn transform_skip_scalar(d: &mut [i32], n: usize, shift: u32) {
     let add = 1i32 << (shift - 1);
     for v in d[..n * n].iter_mut() {
@@ -1051,7 +1113,7 @@ mod arm {
 
 /// Uni-predicted block, default weighting (§8.5.3.3.4.2).
 pub fn put_uni(dst: &mut [u16], dst_stride: usize, src: &[i16], w: usize, h: usize, bit_depth: u8) {
-    if census::enabled() {
+    if census::ALWAYS {
         // Width class of the block, weighted by samples. The vector loops step
         // 8 or 16 samples, so anything narrower falls to a scalar tail -- and
         // 4:2:0 chroma of an 8x8 luma PU is 4 wide.
@@ -1068,7 +1130,7 @@ pub fn put_uni(dst: &mut [u16], dst_stride: usize, src: &[i16], w: usize, h: usi
     }
     let ok = dst.len() >= dst_stride * (h - 1) + w && src.len() >= w * h;
     debug_assert!(ok);
-    if census::enabled() {
+    if census::ALWAYS {
         let simd = cfg!(feature = "simd") && crate::isa() != crate::Isa::Scalar && ok;
         census::bump(if simd { &census::PUT_UNI_SIMD } else { &census::PUT_UNI_SCALAR }, 1);
     }
@@ -1090,7 +1152,7 @@ pub fn put_uni(dst: &mut [u16], dst_stride: usize, src: &[i16], w: usize, h: usi
 
 /// Bi-predicted block, default weighting (§8.5.3.3.4.2).
 pub fn put_bi(dst: &mut [u16], dst_stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, bit_depth: u8) {
-    if census::enabled() {
+    if census::ALWAYS {
         // Width class of the block, weighted by samples. The vector loops step
         // 8 or 16 samples, so anything narrower falls to a scalar tail -- and
         // 4:2:0 chroma of an 8x8 luma PU is 4 wide.
@@ -1107,7 +1169,7 @@ pub fn put_bi(dst: &mut [u16], dst_stride: usize, a: &[i16], b: &[i16], w: usize
     }
     let ok = dst.len() >= dst_stride * (h - 1) + w && a.len() >= w * h && b.len() >= w * h;
     debug_assert!(ok);
-    if census::enabled() {
+    if census::ALWAYS {
         let simd = cfg!(feature = "simd") && crate::isa() != crate::Isa::Scalar && ok;
         census::bump(if simd { &census::PUT_BI_SIMD } else { &census::PUT_BI_SCALAR }, 1);
     }
@@ -1130,7 +1192,7 @@ pub fn put_bi(dst: &mut [u16], dst_stride: usize, a: &[i16], b: &[i16], w: usize
 /// Adds a transform block's residual into the picture, with the clip of
 /// §8.6.6.
 pub fn add_residual(dst: &mut [u16], dst_stride: usize, res: &[i32], w: usize, h: usize, max: i32) {
-    if census::enabled() {
+    if census::ALWAYS {
         // Width class of the block, weighted by samples. The vector loops step
         // 8 or 16 samples, so anything narrower falls to a scalar tail -- and
         // 4:2:0 chroma of an 8x8 luma PU is 4 wide.
@@ -1147,7 +1209,7 @@ pub fn add_residual(dst: &mut [u16], dst_stride: usize, res: &[i32], w: usize, h
     }
     let ok = dst.len() >= dst_stride * (h - 1) + w && res.len() >= w * h;
     debug_assert!(ok);
-    if census::enabled() {
+    if census::ALWAYS {
         let simd = cfg!(feature = "simd") && crate::isa() != crate::Isa::Scalar && ok;
         census::bump(if simd { &census::ADD_RESIDUAL_SIMD } else { &census::ADD_RESIDUAL_SCALAR }, 1);
         census::bump(&census::SAMPLES_ADD_RESIDUAL, (w * h) as u64);
@@ -1171,7 +1233,7 @@ pub fn add_residual(dst: &mut [u16], dst_stride: usize, res: &[i32], w: usize, h
 /// Copy a `w x h` rectangle of samples — full-pel uni-prediction. See
 /// [`copy_block_scalar`] for why the two kernels it replaces compose to this.
 pub fn copy_block(dst: &mut [u16], dst_stride: usize, src: &[u16], src_stride: usize, w: usize, h: usize) {
-    if census::enabled() {
+    if census::ALWAYS {
         census::bump(&census::MC_FULLPEL_UNI, 1);
         census::bump(&census::SAMPLES_MC, (w * h) as u64);
     }
@@ -1185,7 +1247,7 @@ pub fn copy_block(dst: &mut [u16], dst_stride: usize, src: &[u16], src_stride: u
 pub fn avg_block(dst: &mut [u16], dst_stride: usize, a: &[u16], a_stride: usize, b: &[u16], b_stride: usize, w: usize, h: usize) {
     let ok = w > 0 && h > 0 && dst.len() >= dst_stride * (h - 1) + w && a.len() >= a_stride * (h - 1) + w && b.len() >= b_stride * (h - 1) + w;
     debug_assert!(ok);
-    if census::enabled() {
+    if census::ALWAYS {
         census::bump(&census::MC_FULLPEL_BI, 1);
         census::bump(&census::SAMPLES_MC, (w * h) as u64);
     }
@@ -1206,7 +1268,7 @@ pub fn avg_block(dst: &mut [u16], dst_stride: usize, a: &[u16], a_stride: usize,
 pub fn put_bi_fp(dst: &mut [u16], dst_stride: usize, s: &[u16], s_stride: usize, b: &[i16], w: usize, h: usize, bit_depth: u8) {
     let ok = w > 0 && h > 0 && dst.len() >= dst_stride * (h - 1) + w && s.len() >= s_stride * (h - 1) + w && b.len() >= w * h;
     debug_assert!(ok);
-    if census::enabled() {
+    if census::ALWAYS {
         let simd = cfg!(feature = "simd") && crate::isa() != crate::Isa::Scalar && ok;
         census::bump(if simd { &census::PUT_BI_FP_SIMD } else { &census::PUT_BI_FP_SCALAR }, 1);
         census::bump(&census::SAMPLES_MC, (w * h) as u64);
@@ -1227,7 +1289,7 @@ pub fn put_bi_fp(dst: &mut [u16], dst_stride: usize, s: &[u16], s_stride: usize,
 pub fn add_residual_const(dst: &mut [u16], dst_stride: usize, dc: u16, res: &[i32], w: usize, h: usize, max: i32) {
     let ok = w > 0 && h > 0 && dst.len() >= dst_stride * (h - 1) + w && res.len() >= w * h;
     debug_assert!(ok);
-    if census::enabled() {
+    if census::ALWAYS {
         let simd = cfg!(feature = "simd") && crate::isa() != crate::Isa::Scalar && ok;
         census::bump(if simd { &census::ADD_RESIDUAL_DC_SIMD } else { &census::ADD_RESIDUAL_DC_SCALAR }, 1);
         census::bump(&census::SAMPLES_ADD_RESIDUAL, (w * h) as u64);
@@ -1255,7 +1317,7 @@ pub fn weighted_uni(dst: &mut [u16], dst_stride: usize, src: &[i16], w: usize, h
     // them, but a stream that violated it must take the scalar twin, not wrap.
     let fits = (-32768..=32767).contains(&wt) && (1..30).contains(&log2wd) && (1i32 << (log2wd - 1)) <= 32767;
     let ok = w > 0 && h > 0 && dst.len() >= dst_stride * (h - 1) + w && src.len() >= w * h;
-    if census::enabled() {
+    if census::ALWAYS {
         // The predicate must match the dispatch below EXACTLY, switch
         // included, or the census reports an arm that never ran.
         let simd = cfg!(feature = "simd") && crate::isa() == crate::Isa::Avx2 && ok && fits && !scalar_gate();
@@ -1275,7 +1337,7 @@ pub fn weighted_uni(dst: &mut [u16], dst_stride: usize, src: &[i16], w: usize, h
 pub fn weighted_bi(dst: &mut [u16], dst_stride: usize, a: &[i16], b: &[i16], w: usize, h: usize, w0: i32, w1: i32, obias: i32, log2wd: i32, max: i32) {
     let fits = (-32768..=32767).contains(&w0) && (-32768..=32767).contains(&w1) && (0..30).contains(&log2wd);
     let ok = w > 0 && h > 0 && dst.len() >= dst_stride * (h - 1) + w && a.len() >= w * h && b.len() >= w * h;
-    if census::enabled() {
+    if census::ALWAYS {
         // The predicate must match the dispatch below EXACTLY, switch
         // included, or the census reports an arm that never ran.
         let simd = cfg!(feature = "simd") && crate::isa() == crate::Isa::Avx2 && ok && fits && !scalar_gate();
@@ -1295,7 +1357,7 @@ pub fn transform_skip(d: &mut [i32], n: usize, shift: u32) {
     let count = n * n;
     let ok = count > 0 && d.len() >= count && (1..31).contains(&shift);
     debug_assert!(ok);
-    if census::enabled() {
+    if census::ALWAYS {
         let simd = cfg!(feature = "simd") && crate::isa() != crate::Isa::Scalar && ok && !scalar_gate();
         census::bump(if simd { &census::TX_SKIP_SIMD } else { &census::TX_SKIP_SCALAR }, 1);
     }

@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::intra;
 use crate::itx::{self, TransformKind};
 use crate::pic::{PicState, PRED_INTRA};
-use crate::tables::{scan_set, CHROMA_QP_420, SIG_CTX_4X4_BY_SCAN, SIG_NB};
+use crate::tables::{scan_set, CHROMA_QP_420};
 use rusty_h265_accel as accel;
 
 impl<'a> SliceDecoder<'a> {
@@ -151,6 +151,9 @@ impl<'a> SliceDecoder<'a> {
             while k < 2 * n {
                 let end = (k + run - ((yb + k) & rmask)).min(2 * n);
                 if avail(st, (xb as i32 - 1) << ss, ((yb + k) as i32) << ss) {
+                    // Masking these to `& 63` (both are `[_; 64]` and
+                    // `j < 2n <= 64`) retired NO guard and cost 2 instructions:
+                    // LLVM already proves this pair from the loop bound.
                     for j in k..end {
                         refs.left[j] = plane.get(xb - 1, yb + j);
                         refs.left_avail[j] = true;
@@ -341,7 +344,7 @@ impl<'a> SliceDecoder<'a> {
             // sub-block/size/component term, which the old shape recomputed for
             // every one of 2.3 M scanned positions (18.8 M on intra content).
             let (sig_row, sig_off) = if log2 == 2 {
-                (&SIG_CTX_4X4_BY_SCAN[scan_idx], 0usize)
+                (sc.sig_4x4, 0usize)
             } else {
                 let mut o = if xs > 0 || ys > 0 { 3 } else { 0 };
                 if c_idx == 0 {
@@ -358,7 +361,7 @@ impl<'a> SliceDecoder<'a> {
                     // The +3 above is luma-only.
                     o = if log2 == 3 { 9 } else { 12 };
                 }
-                (&SIG_NB[scan_idx][prev_csbf], o)
+                (&sc.sig_nb[prev_csbf & 3], o)
             };
             // The DC of the DC sub-block is context 0 (§9.3.4.2.5). For a 4x4
             // block the map already reads 0 there, so one test serves both.
@@ -384,7 +387,7 @@ impl<'a> SliceDecoder<'a> {
                         if accel::census::ALWAYS {
                             accel::census::bump(&accel::census::RES_SIG_CTX, 1);
                         }
-                        let sig_ctx = if dc_sb && np == 0 { 0 } else { sig_row[np] as usize + sig_off };
+                        let sig_ctx = if dc_sb && np == 0 { 0 } else { sig_row[np & 15] as usize + sig_off };
                         let b = cab.decode(sig_base + sig_ctx) == 1;
                         if b {
                             infer_sb_dc = false;
@@ -395,7 +398,7 @@ impl<'a> SliceDecoder<'a> {
                         true
                     };
                     if s {
-                        sig_pos[nsig] = np as u8;
+                        sig_pos[nsig & 15] = np as u8;
                         nsig += 1;
                     }
                     nn_ -= 1;
@@ -433,7 +436,7 @@ impl<'a> SliceDecoder<'a> {
             if first_g2 != 16 {
                 g2 = cab.decode(gt2_base + ctx_set) == 1;
             }
-            let first_sig = sig_pos[nsig - 1] as usize;
+            let first_sig = sig_pos[(nsig - 1) & 15] as usize;
             let last_sig = sig_pos[0] as usize;
             let sign_hidden = sign_hiding && last_sig - first_sig > 3;
             let nsigns = if sign_hidden { nsig - 1 } else { nsig };
@@ -453,7 +456,7 @@ impl<'a> SliceDecoder<'a> {
             let mut rice = 0u32;
             let mut sum_abs = 0i32;
             for k in 0..nsig {
-                let np = sig_pos[k] as usize;
+                let np = sig_pos[k & 15] as usize;
                 let is_g2_pos = first_g2 == np;
                 let base = 1 + ((g1 >> np) & 1) as i32 + (is_g2_pos && g2) as i32;
                 let threshold = if k < 8 {
@@ -482,7 +485,7 @@ impl<'a> SliceDecoder<'a> {
                         v = -v;
                     }
                 }
-                let (xp, yp) = (pos_scan[np].0 as usize, pos_scan[np].1 as usize);
+                let (xp, yp) = (pos_scan[np & 15].0 as usize, pos_scan[np & 15].1 as usize);
                 let xc = (xs << 2) + xp;
                 let yc = (ys << 2) + yp;
                 nz_w = nz_w.max(xc + 1);

@@ -41,9 +41,13 @@ impl McScratch {
     /// run, so the clamp costs three decisions per row rather than one per
     /// sample.
     pub fn pad_footprint(&mut self, plane: &Plane, x0: i32, y0: i32, fw: usize, fh: usize) {
-        if self.pad.len() < fw * fh {
-            self.pad.resize(fw * fh, 0);
-        }
+        // `pad` is built at the largest footprint HEVC can ask for -- a 64x64
+        // prediction block plus the 7-tap margin, which is exactly
+        // `(64 + 7) * (64 + 7)` -- so this can only ever be a no-op. It is a
+        // `debug_assert` rather than a runtime resize so the release path does
+        // not carry a compare and a call to `Vec::resize` it can never take.
+        // `scratch_holds_the_largest_block` is the test that keeps it true.
+        debug_assert!(self.pad.len() >= fw * fh, "pad footprint {fw}x{fh} exceeds the scratch");
         let pw = plane.width as i32;
         let ph = plane.height as i32;
         let left = (-x0).clamp(0, fw as i32) as usize;
@@ -55,6 +59,11 @@ impl McScratch {
         // a copy and up to two fills per repeat. Building it once and
         // replicating is strictly less work, and blocks at a picture edge are
         // 12% of motion compensation (`MC_EDGE_PAD` = 31,137 a clip).
+        // The source column range is the same for every row, so it is resolved
+        // once rather than per row.
+        let sx_mid = (x0 + left as i32) as usize;
+        let sx_all = x0.clamp(0, pw - 1) as usize;
+        let last = plane.width - 1;
         let mut prev_sy = usize::MAX;
         for y in 0..fh {
             let sy = (y0 + y as i32).clamp(0, ph - 1) as usize;
@@ -66,21 +75,20 @@ impl McScratch {
                 continue;
             }
             prev_sy = sy;
-            let row = &plane.data[sy * plane.stride..sy * plane.stride + plane.width];
+            let rb = sy * plane.stride;
+            let row = &plane.data[rb..rb + plane.width];
             let out = &mut self.pad[y * fw..y * fw + fw];
             if mid > 0 {
-                let sx = (x0 + left as i32) as usize;
-                out[left..left + mid].copy_from_slice(&row[sx..sx + mid]);
+                out[left..left + mid].copy_from_slice(&row[sx_mid..sx_mid + mid]);
                 if left > 0 {
                     out[..left].fill(row[0]);
                 }
                 if right > 0 {
-                    out[left + mid..].fill(row[plane.width - 1]);
+                    out[left + mid..].fill(row[last]);
                 }
             } else {
                 // The whole footprint is off one side: one edge sample.
-                let sx = x0.clamp(0, pw - 1) as usize;
-                out.fill(row[sx]);
+                out.fill(row[sx_all]);
             }
         }
     }

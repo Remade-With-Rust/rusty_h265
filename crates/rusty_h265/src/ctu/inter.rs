@@ -83,6 +83,12 @@ impl PuMv {
     }
 }
 
+/// `l0CandIdx`/`l1CandIdx` of §8.5.3.2.3. Twelve entries is exact, not a
+/// bound: the loop runs to `numOrig * (numOrig - 1)` and entry requires
+/// `numOrig < MaxNumMergeCand <= 5`, so `numOrig <= 4` and the index stops at
+/// 11. Pairing them into one table of tuples was measured: +22 instructions
+/// for no guard change, because the two lookups share one bound and LLVM had
+/// already merged the check.
 const L0_CAND: [usize; 12] = [0, 1, 0, 2, 1, 2, 0, 3, 1, 3, 2, 3];
 const L1_CAND: [usize; 12] = [1, 0, 2, 0, 2, 1, 3, 0, 3, 1, 3, 2];
 
@@ -143,11 +149,19 @@ fn scale_mv(mv: [i32; 2], td: i32, tb: i32) -> [i32; 2] {
 /// which are `put_uni` and `put_bi` term for term. Detecting it routes the
 /// block to the cheaper kernel — and re-opens the full-pel fast path, which is
 /// gated on "no weighting" and was therefore closed for every P slice.
-fn neutral_weights(t: &PredWeightTable, pu: &PuMv, used: [bool; 2], c: usize) -> bool {
-    // Bring-up switch: `RH265_NO_NEUTRAL_WP=1` forces every weighted slice down
-    // the weighted path, so this gate can be A/B'd inside one binary.
+/// Bring-up switch: `RH265_NO_NEUTRAL_WP=1` forces every weighted slice down
+/// the weighted path, so the gate can be A/B'd inside one binary.
+///
+/// Read once per prediction unit by the caller, not once per COMPONENT inside
+/// `neutral_weights` -- a `OnceLock` read is an atomic load and a branch, and
+/// on a weighted slice this ran three times for every unit.
+fn neutral_wp_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *OFF.get_or_init(|| std::env::var_os("RH265_NO_NEUTRAL_WP").is_some()) {
+    *OFF.get_or_init(|| std::env::var_os("RH265_NO_NEUTRAL_WP").is_some())
+}
+
+fn neutral_weights(t: &PredWeightTable, pu: &PuMv, used: [bool; 2], c: usize, off: bool) -> bool {
+    if off {
         return false;
     }
     let denom = if c == 0 { t.luma_log2_weight_denom } else { t.chroma_log2_weight_denom };
@@ -712,6 +726,15 @@ impl<'a> SliceDecoder<'a> {
         let pic = &mut self.pic;
 
         let weights = sh.pred_weight.as_ref();
+        // Each list's reference picture, resolved once for the whole unit. It
+        // was looked up three times per COMPONENT -- in the full-pel scan, in
+        // the interpolation loop, and again through the `refp` closure at the
+        // write -- each a bounds-checked index into the reference list.
+        let wp_off = weights.is_some() && neutral_wp_off();
+        let rp = [
+            (pu.flags & 1 != 0).then(|| &refs.l0[pu.ref_idx[0] as usize]),
+            (pu.flags & 2 != 0).then(|| &refs.l1[pu.ref_idx[1] as usize]),
+        ];
         for c in 0..3usize {
             let ss = if c == 0 { 0 } else { 1 };
             let (bw, bh) = (w >> ss, h >> ss);
@@ -724,6 +747,10 @@ impl<'a> SliceDecoder<'a> {
             let m = taps / 2 - 1;
             let (fw, fh) = (bw + taps - 1, bh + taps - 1);
 
+            // The fractional split is a property of the COMPONENT, not of the
+            // list: it was recomputed inside both per-list loops below.
+            let (frac_bits, frac_mask) = if c == 0 { (2u32, 3i32) } else { (3u32, 7i32) };
+
             // Geometry first, for every list, so the full-pel fast path below
             // can decide before any interpolation happens.
             let mut used = [false; 2];
@@ -734,7 +761,6 @@ impl<'a> SliceDecoder<'a> {
                 }
                 used[l] = true;
                 let mv = pu.mv[l];
-                let (frac_bits, frac_mask) = if c == 0 { (2u32, 3i32) } else { (3, 7) };
                 geo[l] = (
                     xb as i32 + (mv[0] >> frac_bits),
                     yb as i32 + (mv[1] >> frac_bits),
@@ -761,17 +787,14 @@ impl<'a> SliceDecoder<'a> {
             // is not weighting. Collapsing it here re-opens both the full-pel
             // fast path below and the default uni/bi writes.
             let weights = match weights {
-                Some(t) if neutral_weights(t, pu, used, c) => None,
+                Some(t) if neutral_weights(t, pu, used, c, wp_off) => None,
                 other => other,
             };
             let mut fp = [None; 2];
             if weights.is_none() && bit_depth <= 12 {
                 for l in 0..2usize {
-                    if !used[l] {
-                        continue;
-                    }
+                    let Some(r) = rp[l] else { continue };
                     let (xi, yi, fx, fy) = geo[l];
-                    let r = if l == 0 { &refs.l0[pu.ref_idx[0] as usize] } else { &refs.l1[pu.ref_idx[1] as usize] };
                     let p = &r.pic.planes[c];
                     if fx == 0 && fy == 0 && xi >= 0 && yi >= 0 && xi as usize + bw <= p.width && yi as usize + bh <= p.height {
                         fp[l] = Some((yi as usize * p.stride + xi as usize, p.stride));
@@ -780,27 +803,22 @@ impl<'a> SliceDecoder<'a> {
             }
 
             for l in 0..2usize {
-                if pu.flags & (1 << l) == 0 {
-                    continue;
-                }
                 if fp[l].is_some() {
                     continue; // resolved above; no filter, no scratch
                 }
-                let r = if l == 0 { &refs.l0[pu.ref_idx[0] as usize] } else { &refs.l1[pu.ref_idx[1] as usize] };
+                let Some(r) = rp[l] else { continue };
                 let plane = &r.pic.planes[c];
-                let mv = pu.mv[l];
-                let (frac_bits, frac_mask) = if c == 0 { (2u32, 3i32) } else { (3, 7) };
-                let xi = xb as i32 + (mv[0] >> frac_bits);
-                let yi = yb as i32 + (mv[1] >> frac_bits);
-                let fx = (mv[0] & frac_mask) as usize;
-                let fy = (mv[1] & frac_mask) as usize;
+                // `geo[l]` already holds this: the old shape recomputed the
+                // whole integer/fractional split -- two shifts, two masks and
+                // two adds -- and threw the first copy away.
+                let (xi, yi, fx, fy) = geo[l];
                 let (x0, y0) = (xi - m as i32, yi - m as i32);
 
                 let interior = x0 >= 0 && y0 >= 0 && (x0 as usize + fw) <= plane.width && (y0 as usize + fh) <= plane.height;
                 let (src, stride): (&[u16], usize) = if interior {
                     (&plane.data[y0 as usize * plane.stride + x0 as usize..], plane.stride)
                 } else {
-                    if accel::census::enabled() {
+                    if accel::census::ALWAYS {
                         accel::census::bump(&accel::census::MC_EDGE_PAD, 1);
                     }
                     scratch.pad_footprint(plane, x0, y0, fw, fh);
@@ -818,10 +836,7 @@ impl<'a> SliceDecoder<'a> {
             let stride = plane.stride;
             let off = yb * stride + xb;
             let dst = &mut plane.data[off..];
-            let refp = |l: usize| -> &[u16] {
-                let r = if l == 0 { &refs.l0[pu.ref_idx[0] as usize] } else { &refs.l1[pu.ref_idx[1] as usize] };
-                &r.pic.planes[c].data
-            };
+            let refp = |l: usize| -> &[u16] { &rp[l].unwrap().pic.planes[c].data };
             match (used[0], used[1], weights) {
                 (true, false, None) | (false, true, None) => {
                     let l = if used[0] { 0 } else { 1 };

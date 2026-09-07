@@ -58,7 +58,17 @@ pub struct PicState {
     pub ctb_h: usize,
     /// `MinTbAddrZs` at 4×4 granularity.
     pub zs: Vec<u32>,
+
     /// Per CTB (raster): `SliceAddrRs` of the slice containing it, or -1.
+    ///
+    /// NOT fused with `tile_id` into one key. §6.4.1 asks one question of a
+    /// neighbouring CTB -- same slice AND same tile -- so packing both into a
+    /// `u64` would make it one load, one bounds check and one compare where
+    /// there are two, two and three, and would subsume the `< 0` test as well.
+    /// Built twice and measured twice: ALONGSIDE these arrays it cost
+    /// `coding_quadtree` +164 instructions, and REPLACING them (with accessors
+    /// unpacking the halves for the loop filters) +259. The fusion itself is
+    /// what does not pay, not the extra array.
     pub slice_addr: Vec<i32>,
     /// Per CTB (raster): index into the picture's slice header list.
     pub ctb_slice: Vec<u16>,

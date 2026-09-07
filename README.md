@@ -50,23 +50,37 @@ tougher bar than libde265.
 
 | stream | Mpx | ffmpeg 8.1.2 | **rusty_h265** | ratio | paired verdict |
 |---|---:|---:|---:|---:|---|
-| 720p 8-bit, mainstream inter | 55.3 | 328 ms | 563 ms | 0.60x | 0/15, z = -3.87 |
-| 720p 10-bit, same content | 55.3 | 375 ms | 672 ms | 0.56x | 0/15, z = -3.87 |
-| deblocking-heavy | 331.8 | 781 ms | 1,313 ms | 0.58x | 0/15, z = -3.87 |
-| weighted prediction | 255.6 | 766 ms | 953 ms | 0.77x | 2/15, z = -2.84 |
+| 720p 8-bit, mainstream inter | 55.3 | 277 ms | 539 ms | 0.51x | 1/21, z = -4.15 |
+| 720p 10-bit, same content | 55.3 | 321 ms | 652 ms | 0.51x | 0/21, z = -4.58 |
+| deblocking-heavy | 331.8 | 738 ms | 1,313 ms | 0.56x | 0/21, z = -4.58 |
+| weighted prediction | 255.6 | 766 ms | 1,097 ms | 0.70x | 0/21, z = -4.58 |
 
-<sub>**We are 1.3x-1.8x slower than ffmpeg, and that is the honest number.**
+<sub>**We are 1.4x-2.0x slower than ffmpeg, and that is the honest number.**
 Measured 2026-09-07 with [`tools/bench/codec-bench.ps1`](tools/bench/codec-bench.ps1):
-pinned to one core at High priority, **CPU time** (not elapsed), arms
-ABBA-alternated, 15 pairs, paired win-rate with a z-score -- every row is a
-verdict (|z| > 2), not noise. Both arms discard their output, and **both arms'
-decoded frame counts are checked against `ffprobe` before any timing is
-reported**. The resolution floor -- ffmpeg measured against itself -- is
-**0.955x**. This decoder started at 3,750 ms on the first row; it is 563 ms now.
-0.1.0 measured 0.44x-0.67x on the same harness, so the gap has closed by roughly
-a third. (The deblocking-heavy row is not comparable across the two releases:
-that stream was regenerated and is now 331.8 Mpx against 8.1 Mpx before. On the
-current stream, 0.2.0 is 1.079x faster than 0.1.0, 20/21, z = 4.15.)</sub>
+pinned to one core at High priority, arms ABBA-alternated, 21 pairs, paired
+win-rate with a z-score -- every row is a verdict (|z| > 2), not noise. Both arms
+discard their output, and **both arms' decoded frame counts are checked against
+`ffprobe` before any timing is reported**. The resolution floor -- ffmpeg measured
+against itself -- is **0.980x**.</sub>
+
+<sub>**This supersedes the 1.3x-1.8x published for 0.2.0, and the change is a
+measurement fix, not a regression.** That figure came from two defects in our own
+harness, both corrected in this release. (1) It timed with
+`Process.TotalProcessorTime`, which on Windows is kernel TICK ACCOUNTING quantised
+to **15.625 ms** -- every reading in the 0.2.0 table was an exact multiple of it,
+so the differences quoted were two ticks, and the harness's tie-exclusion then
+silently dropped the closest pairs. (2) It charged each arm's process startup to
+that arm, and `ffmpeg.exe` is a **242 MB** binary against our 696 KB, so ffmpeg
+paid ~170 ms of image loading on a ~280 ms decode. Both arms now report their own
+internal decode time (`decode_ms` here, `-benchmark rtime` for ffmpeg), which has
+1 ms resolution and excludes process launch on both sides. The corrected method is
+LESS flattering to us, which is why it is the one we publish.</sub>
+
+<sub>Release over release, on the corrected harness and measured directly against
+the 0.2.0 binary on the same box: **1.059x** on 720p 8-bit inter (19/21, z = 3.71),
+**1.031x** deblocking-heavy (20/21, z = 4.15), **1.034x** weighted prediction
+(20/21, z = 4.15), and 1.018x all-intra (14/21, z = 1.53 -- not a verdict). This
+decoder started at 3,750 ms on the first row; it is 539 ms now.</sub>
 
 ## What is this?
 

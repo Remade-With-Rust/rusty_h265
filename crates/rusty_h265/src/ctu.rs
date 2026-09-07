@@ -637,12 +637,20 @@ impl<'a> SliceDecoder<'a> {
             1 => (0b0100, 0b1000),
             _ => (0b0101, 0b1010),
         };
+        // Both walks start at the same 4x4 and the indexed form re-proved the
+        // bound on every element. Taking each as ONE subslice proves it once:
+        // the left column is a strided walk of that slice, the top row is a
+        // contiguous run of it.
         let w4 = self.st.w4;
-        for yy in (y >> 2)..((y + h) >> 2) {
-            self.st.edges[yy * w4 + (x >> 2)] |= bits;
+        let (x4, y4) = (x >> 2, y >> 2);
+        let base = y4 * w4 + x4;
+        let rows = ((y + h) >> 2) - y4;
+        let cols = ((x + w) >> 2) - x4;
+        for e in self.st.edges[base..].iter_mut().step_by(w4).take(rows) {
+            *e |= bits;
         }
-        for xx in (x >> 2)..((x + w) >> 2) {
-            self.st.edges[(y >> 2) * w4 + xx] |= bits_h;
+        for e in &mut self.st.edges[base..base + cols] {
+            *e |= bits_h;
         }
     }
 
@@ -871,6 +879,11 @@ impl<'a> SliceDecoder<'a> {
 
     // ---- PCM (§7.3.8.7) ----
 
+    /// `#[cold]`: PCM is a conformance corner, not a coding tool a real
+    /// encoder emits -- and inlined, its two sample loops put the whole
+    /// bit-reader and `Plane::set` into `coding_quadtree`.
+    #[cold]
+    #[inline(never)]
     fn pcm_samples(&mut self, x0: usize, y0: usize, n: usize) -> Result<()> {
         let start = self.cab.aligned_byte_pos();
         let data = &self.rbsp.data;

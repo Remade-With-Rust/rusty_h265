@@ -352,7 +352,7 @@ pub fn luma_edge(data: &mut [u16], stride: usize, x: usize, y: usize, dir: usize
         let dpq0 = dp0 + dq0;
         let dpq3 = dp3 + dq3;
         if dpq0 + dpq3 >= beta {
-            if census::enabled() {
+            if census::ALWAYS {
                 census::arm(&census::RT_DEBLOCK_SKIP);
             }
             return;
@@ -361,7 +361,7 @@ pub fn luma_edge(data: &mut [u16], stride: usize, x: usize, y: usize, dir: usize
         let strong = dsam(0, 2 * dpq0) && dsam(3, 2 * dpq3);
         let dep = (dp0 + dp3) < ((beta + (beta >> 1)) >> 3);
         let deq = (dq0 + dq3) < ((beta + (beta >> 1)) >> 3);
-        if census::enabled() {
+        if census::ALWAYS {
             census::route(strong, &census::RT_DEBLOCK_STRONG, &census::RT_DEBLOCK_WEAK);
             census::bump(&census::DEBLOCK_LUMA_SIMD, 1);
         }
@@ -369,7 +369,7 @@ pub fn luma_edge(data: &mut [u16], stride: usize, x: usize, y: usize, dir: usize
         unsafe { x86::luma_edge_sse2(data.as_mut_ptr(), stride, x, y, dir, tc, no_p, no_q, max, strong, dep, deq) };
         return;
     }
-    if census::enabled() {
+    if census::ALWAYS {
         census::bump(&census::DEBLOCK_LUMA_SCALAR, 1);
     }
     luma_edge_scalar(data, stride, x, y, dir, beta, tc, no_p, no_q, max);

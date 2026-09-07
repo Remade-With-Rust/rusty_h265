@@ -105,24 +105,36 @@ fn boundary_strength(st: &PicState, p: usize, q: usize, tu_edge: bool) -> u8 {
     }
 }
 
-/// Whether the edge between 4×4 blocks p (left/above) and q may be filtered
-/// at all (picture, tile and slice boundaries, disabled slices).
-fn edge_allowed(st: &PicState, pps: &Pps, xp: usize, yp: usize, xq: usize, yq: usize) -> bool {
-    let cq = st.ctb_of(xq, yq);
-    let cp = st.ctb_of(xp, yp);
-    let fq = &st.ctb_filter[cq];
-    if fq.deblock_disabled {
+/// The tile/slice half of [`edge_allowed`], for the two blocks in DIFFERENT
+/// CTBs.
+///
+/// `#[cold]`: an edge crosses a CTB boundary once every 16 (or 32, or 64)
+/// samples along the scan, so the overwhelming majority of edges answer
+/// `cp == cq` and never come here -- but inlined, its four indexed reads put
+/// twelve guard branches into `apply_in_loop_filters` for a path almost no
+/// edge takes.
+#[cold]
+#[inline(never)]
+fn across_ctb(st: &PicState, pps: &Pps, cp: usize, cq: usize, lf_across_slices: bool) -> bool {
+    if st.tile_id[cp] != st.tile_id[cq] && !pps.loop_filter_across_tiles_enabled {
         return false;
     }
-    if cp != cq {
-        if st.tile_id[cp] != st.tile_id[cq] && !pps.loop_filter_across_tiles_enabled {
-            return false;
-        }
-        if st.slice_addr[cp] != st.slice_addr[cq] && !fq.lf_across_slices {
-            return false;
-        }
+    if st.slice_addr[cp] != st.slice_addr[cq] && !lf_across_slices {
+        return false;
     }
     true
+}
+
+/// Whether the edge between 4×4 blocks p (left/above) and q may be filtered
+/// at all (picture, tile and slice boundaries, disabled slices).
+///
+/// `cq` and the q block's filter parameters come from the caller: the two
+/// directions of one 4×4 block share a q, so deriving them here computed the
+/// same `ctb_of` twice, read `ctb_filter` twice and tested `deblock_disabled`
+/// twice per block.
+#[inline]
+fn edge_allowed(st: &PicState, pps: &Pps, cp: usize, cq: usize, lf_across_slices: bool) -> bool {
+    cp == cq || across_ctb(st, pps, cp, cq, lf_across_slices)
 }
 
 fn deblock(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, bs_v: &mut Vec<u8>, bs_h: &mut Vec<u8>) {
@@ -141,25 +153,47 @@ fn deblock(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, bs_v: &
     bs_h.clear();
     bs_v.resize(w4 * h4, 0);
     bs_h.resize(w4 * h4, 0);
+    // Row slices, not `[y4 * w4 + x4]`.
+    //
+    // This walks every 4x4 block of the picture -- 57,600 a frame at 720p --
+    // and each iteration indexed five separate `Vec`s at the same computed
+    // offset, so each carried its own bounds check against its own length.
+    // Reborrowing one row of each per `y4` proves all of them once: every
+    // index below is `x4 < w4` against a slice that is `w4` long. The
+    // above-neighbour is the previous row's slice, which is where the `y4 > 0`
+    // test already put it.
     for y4 in 0..h4 {
+        let row = y4 * w4;
+        let edges = &st.edges[row..row + w4];
+        let modes = &st.pred_mode[row..row + w4];
+        let above = if y4 > 0 { &st.pred_mode[row - w4..row] } else { modes };
+        let bv = &mut bs_v[row..row + w4];
+        let bh = &mut bs_h[row..row + w4];
         for x4 in 0..w4 {
-            let i = y4 * w4 + x4;
-            let e = st.edges[i];
-            if st.pred_mode[i] == 0 {
+            let e = edges[x4];
+            if modes[x4] == 0 {
                 continue;
             }
-            // vertical edge on the 8-grid
-            if x4 > 0 && x4 % 2 == 0 && e & 0b0101 != 0 {
-                let p = i - 1;
-                if st.pred_mode[p] != 0 && edge_allowed(st, pps, x4 * 4 - 1, y4 * 4, x4 * 4, y4 * 4) {
-                    bs_v[i] = boundary_strength(st, p, i, e & 1 != 0);
-                }
+            // Decide BOTH directions' eligibility first, then derive the q
+            // block's CTB once for whichever of them survives -- `ctb_of`, the
+            // `ctb_filter` lookup and the `deblock_disabled` test are the same
+            // for the two edges of one 4x4 block, and were computed twice.
+            let ve = x4 > 0 && x4 % 2 == 0 && e & 0b0101 != 0 && modes[x4 - 1] != 0;
+            let he = y4 > 0 && y4 % 2 == 0 && e & 0b1010 != 0 && above[x4] != 0;
+            if !(ve || he) {
+                continue;
             }
-            if y4 > 0 && y4 % 2 == 0 && e & 0b1010 != 0 {
-                let p = i - w4;
-                if st.pred_mode[p] != 0 && edge_allowed(st, pps, x4 * 4, y4 * 4 - 1, x4 * 4, y4 * 4) {
-                    bs_h[i] = boundary_strength(st, p, i, e & 2 != 0);
-                }
+            let cq = st.ctb_of(x4 * 4, y4 * 4);
+            let fq = &st.ctb_filter[cq];
+            if fq.deblock_disabled {
+                continue;
+            }
+            let lfs = fq.lf_across_slices;
+            if ve && edge_allowed(st, pps, st.ctb_of(x4 * 4 - 1, y4 * 4), cq, lfs) {
+                bv[x4] = boundary_strength(st, row + x4 - 1, row + x4, e & 1 != 0);
+            }
+            if he && edge_allowed(st, pps, st.ctb_of(x4 * 4, y4 * 4 - 1), cq, lfs) {
+                bh[x4] = boundary_strength(st, row + x4 - w4, row + x4, e & 2 != 0);
             }
         }
     }
@@ -188,6 +222,14 @@ fn deblock(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, bs_v: &
         let (ys, ystep, xs, xstep) = if dir == 0 { (0, 1, 2, 2) } else { (2, 2, 0, 1) };
         let mut y4 = ys;
         while y4 < h4 {
+            // NOT row-sliced, unlike the strength scan above -- the same
+            // rewrite was applied here and measured +70 instructions for -4
+            // guards, so it was reverted. The difference is density: that scan
+            // visits every 4x4 block and amortises one row slice over `w4`
+            // iterations, while this one is STRIDED (`xstep` 2, and half the
+            // rows) so the same setup serves half as many reads, against a
+            // loop body large enough that five more live slice pointers cost
+            // real registers.
             let mut x4 = xs;
             while x4 < w4 {
                 let i = y4 * w4 + x4;
@@ -247,21 +289,61 @@ fn deblock(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, bs_v: &
 fn filter_chroma_edge(pl: &mut Plane, x: usize, y: usize, dir: usize, tc: i32, no_p: bool, no_q: bool, bd: u8) {
     let stride = pl.stride;
     let max = (1i32 << bd) - 1;
-    // Same lattice as the luma filter; see `filter_luma_edge`.
-    let (line_step, tap_step): (isize, isize) = if dir == 0 { (stride as isize, 1) } else { (1, stride as isize) };
-    let origin = (y * stride + x) as isize;
-    let idx = |k: usize, i: i32| -> usize { (origin + k as isize * line_step + i as isize * tap_step) as usize };
-    for k in 0..2 {
-        let p0 = pl.data[idx(k, -1)] as i32;
-        let p1 = pl.data[idx(k, -2)] as i32;
-        let q0 = pl.data[idx(k, 0)] as i32;
-        let q1 = pl.data[idx(k, 1)] as i32;
-        let delta = ((((q0 - p0) << 2) + p1 - q1 + 4) >> 3).clamp(-tc, tc);
-        if !no_p {
-            pl.data[idx(k, -1)] = (p0 + delta).clamp(0, max) as u16;
+    let origin = y * stride + x;
+    // Take the segment's whole footprint as ONE window, then index inside it.
+    //
+    // The `idx(k, i)` form re-proved the bound on each of the twelve accesses,
+    // and the two-line loop unrolls and the whole function inlines once per
+    // chroma plane -- which is how a twenty-line filter came to carry 67 of
+    // `apply_in_loop_filters`'s guard branches, over half of them.
+    //
+    // Slicing with an explicit length makes every offset below provable
+    // against it: `w.len()` is a compile-time-visible expression in `stride`,
+    // and each index is `< len` by construction. One check for the window
+    // replaces twelve, and the arithmetic inside is unchanged.
+    //
+    // §8.7.2.5.5: p1 p0 | q0 q1 across the edge, p0 and q0 written.
+    #[inline(always)]
+    fn line(p1: i32, p0: i32, q0: i32, q1: i32, tc: i32) -> i32 {
+        ((((q0 - p0) << 2) + p1 - q1 + 4) >> 3).clamp(-tc, tc)
+    }
+    // Indexing the window by `i * stride + k` leaves the eight inner accesses
+    // checked -- LLVM will not relate `3 * stride + k` to a length of
+    // `3 * stride + 2`. Splitting the window into rows of an exact length does
+    // prove them (guards 77 -> 51), and was still REVERTED: the three
+    // `split_at_mut` calls and their reslices cost 58 instructions more than
+    // the 26 guards they retired. A guard is a compare and a never-taken jump;
+    // it is worth removing when something else pays for it, not on its own.
+    if dir == 0 {
+        // Vertical edge: a line is four CONTIGUOUS samples at x-2..=x+1, on
+        // rows y and y+1. Window `stride + 4` long, index `k * stride + j`.
+        let lo = origin - 2;
+        let w = &mut pl.data[lo..lo + stride + 4];
+        for k in 0..2 {
+            let b = k * stride;
+            let (p1, p0, q0, q1) = (w[b] as i32, w[b + 1] as i32, w[b + 2] as i32, w[b + 3] as i32);
+            let d = line(p1, p0, q0, q1, tc);
+            if !no_p {
+                w[b + 1] = (p0 + d).clamp(0, max) as u16;
+            }
+            if !no_q {
+                w[b + 2] = (q0 - d).clamp(0, max) as u16;
+            }
         }
-        if !no_q {
-            pl.data[idx(k, 0)] = (q0 - delta).clamp(0, max) as u16;
+    } else {
+        // Horizontal edge: a line is a COLUMN, rows y-2..=y+1 at columns x and
+        // x+1. Window `3 * stride + 2` long, index `i * stride + k`.
+        let lo = origin - 2 * stride;
+        let w = &mut pl.data[lo..lo + 3 * stride + 2];
+        for k in 0..2 {
+            let (p1, p0, q0, q1) = (w[k] as i32, w[stride + k] as i32, w[2 * stride + k] as i32, w[3 * stride + k] as i32);
+            let d = line(p1, p0, q0, q1, tc);
+            if !no_p {
+                w[stride + k] = (p0 + d).clamp(0, max) as u16;
+            }
+            if !no_q {
+                w[2 * stride + k] = (q0 - d).clamp(0, max) as u16;
+            }
         }
     }
 }
@@ -303,6 +385,19 @@ fn sao(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, scratch: &m
             (p.width, p.height, p.stride)
         };
         if pw == 0 || ph == 0 {
+            continue;
+        }
+        // Does ANY coding tree block in this component actually apply SAO?
+        //
+        // The copy below is the deblocked picture, which SAO must read because
+        // it filters from unfiltered neighbours -- but it was taken
+        // unconditionally, before anything looked at whether the component has
+        // a single active CTB. That is ~1.8 MB for 720p luma and ~0.9 MB for
+        // the two chroma planes, every picture, and on ordinary content 85% of
+        // CTBs code `type_idx == 0` (`RT_SAO_OFF` 36,710 of 43,200). Scanning
+        // 240 bytes of already-parsed parameters to decide is strictly cheaper
+        // than the memcpy it can skip.
+        if !(0..st.ctb_h * st.ctb_w).any(|rs| st.slice_addr[rs] >= 0 && st.sao[rs][c].type_idx != 0) {
             continue;
         }
         // The deblocked picture, reused across planes and pictures.

@@ -4,6 +4,74 @@ All notable changes to `rusty_h265` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-07
+
+A performance release, and a **correction to how we measure**. Conformance is
+unchanged and still exact: 147/147 JCT-VC `HEVC_v1` streams bit-exact, SEI
+100/100, on both the AVX2 and SSE4.1 rungs.
+
+### Fixed -- the benchmark harness, and the numbers it produced
+
+- **`tools/bench/codec-bench.ps1` timed with `Process.TotalProcessorTime`, which
+  on Windows is kernel TICK ACCOUNTING quantised to 15.625 ms.** Every reading in
+  the 0.2.0 performance table was an exact multiple of that tick, so the
+  differences it reported were two ticks; anything smaller was invisible, and the
+  harness's tie-exclusion then discarded exactly the closest pairs. On one stream
+  the paired-ratio and per-arm-median estimators disagreed in SIGN because both
+  were reading a 15.6 ms lattice. Timing is now the arms' own internal decode time
+  (1 ms resolution) or a `QueryPerformanceCounter` wall clock, and the harness
+  measures its own quantum and refuses to report a difference under three of them.
+- **It charged process startup to each arm.** `ffmpeg.exe` is 242 MB against our
+  696 KB, so ffmpeg was paying ~170 ms of image loading on a ~280 ms decode. Both
+  arms now report decode time from inside the process.
+- **CPU time is still collected, for the job it is actually good at**: `cpu/wall`
+  per sample, which detects a descheduled (< 1) or multi-threaded (> 1) run. That
+  was the real content of the rule that made it the timing quantity.
+- **Consequently the published ffmpeg ratio moves from 1.3x-1.8x to 1.4x-2.0x.**
+  That is a measurement fix, not a regression -- the decoder got faster this
+  release, on every stream where the result is a verdict. The corrected method is
+  less flattering to us, which is why it is the one we publish.
+
+### Performance
+
+Measured directly against the 0.2.0 binary on the same box, corrected harness,
+21 pairs, ABBA-interleaved:
+
+| stream | 0.2.0 | 0.3.0 | ratio | verdict |
+|---|---:|---:|---:|---|
+| 720p 8-bit, mainstream inter | 574 ms | 541 ms | 1.059x | 19/21, z = 3.71 |
+| deblocking-heavy | 1,428 ms | 1,380 ms | 1.031x | 20/21, z = 4.15 |
+| weighted prediction | 1,084 ms | 978 ms | 1.034x | 20/21, z = 4.15 |
+| all-intra | 6,848 ms | 6,777 ms | 1.018x | 14/21, z = 1.53 -- not a verdict |
+
+- **The motion-compensation entry path**: `interp_luma` went 500 -> 346 emitted
+  instructions and `interp_chroma` 423 -> 254, with the vector kernels untouched.
+  Fixed-size filter tables with masked indices retire the bounds checks (guard
+  branches 20 -> 5 and 13 -> 2); one dispatcher read per call is threaded down
+  instead of three `OnceLock` probes; the never-taken scalar fallbacks moved off
+  the hot path.
+- **The loop filter**: `apply_in_loop_filters` went 2,943 -> 2,420 instructions.
+  `filter_chroma_edge` takes the segment's whole footprint as one window per
+  direction rather than re-proving twelve indexed accesses; the boundary-strength
+  scan reads a row slice of each per-4x4 map instead of indexing five `Vec`s per
+  block; the q block's CTB and filter parameters are derived once for both
+  directions.
+- **The residual parser and scan tables**: five masked indices, and two more
+  per-block table dispatches folded into the single `ScanSet` lookup.
+- **Six pixel-kernel scalar fallbacks** marked cold as one set -- `weighted_uni`
+  205 -> 112 instructions, `put_bi_fp` 297 -> 226, `avg_block` 209 -> 149.
+
+### Rejected
+
+Thirteen candidate optimisations were built, measured and reverted, and the
+reasoning is in `docs/plans/` upstream. Three worth naming: fusing `slice_addr`
+and `tile_id` into one per-CTB key cost +164 instructions as an extra array and
++259 as a replacement (the fusion itself is what does not pay); row-slicing a
+per-block map won on a dense scan and LOST on a strided one in the same function;
+and marking `copy_block_scalar` cold took its caller to one instruction, which is
+a bare jump rather than a win -- `copy_block` has no vector path, so the
+"fallback" is its only path.
+
 ## [0.2.0] - 2026-09-07
 
 A performance release. Conformance is unchanged and still exact; the decoder is

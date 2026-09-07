@@ -86,6 +86,18 @@ fn main() {
     // benchmark but a zero here is not deployed, whatever the call graph says.
     if std::env::var_os("RH265_CENSUS").is_some() {
         eprintln!("{}", rusty_h265::accel::describe());
+        // The per-bin, per-block and per-edge counters are gated on
+        // `census::ALWAYS`, a `cfg!(feature = "census")` CONST, because their
+        // runtime check -- a `OnceLock` read -- is itself the cost being
+        // measured on those paths. Without the feature they compile away and
+        // report ZERO, which reads exactly like "this path never runs": the
+        // false-refutation shape that a byte census exists to prevent. Say so
+        // loudly rather than let a zero be believed.
+        if !rusty_h265::accel::census::ALWAYS {
+            eprintln!(
+                "census WARNING: built without `--features census`. Counters on per-bin,                  per-block and per-edge paths are compile-time gated and will read 0 here.                  Rebuild with `--features census` before believing any zero below."
+            );
+        }
         for (name, v) in rusty_h265::accel::census::snapshot() {
             eprintln!("census {name} = {v}");
         }

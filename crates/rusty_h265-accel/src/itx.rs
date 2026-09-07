@@ -86,13 +86,18 @@ mod x86 {
             if c != 0 {
                 let row = unsafe { tab.add(k * tstep * 32) };
                 if LEN >= 8 {
+                    // The coefficient broadcast is written ONCE and reused, as
+                    // `accum_butterfly_avx2` already does. Spelled inline at
+                    // both uses it relies on the compiler to common them up,
+                    // and the two kernels then read differently for no reason.
+                    let cv = _mm256_set1_epi32(c);
                     // `vpmovsxwd` widens eight `i16` to eight `i32` in one
                     // instruction, taking its load as a memory operand.
                     let t0 = _mm256_cvtepi16_epi32(unsafe { _mm_loadu_si128(row as *const __m128i) });
-                    a0 = _mm256_add_epi32(a0, _mm256_mullo_epi32(t0, _mm256_set1_epi32(c)));
+                    a0 = _mm256_add_epi32(a0, _mm256_mullo_epi32(t0, cv));
                     if LEN >= 16 {
                         let t1 = _mm256_cvtepi16_epi32(unsafe { _mm_loadu_si128(row.add(8) as *const __m128i) });
-                        a1 = _mm256_add_epi32(a1, _mm256_mullo_epi32(t1, _mm256_set1_epi32(c)));
+                        a1 = _mm256_add_epi32(a1, _mm256_mullo_epi32(t1, cv));
                     }
                 } else {
                     // LEN == 4: a half register is the whole row.
@@ -181,14 +186,27 @@ mod x86 {
         let sh = _mm_cvtsi32_si128(shift as i32);
         let lov = _mm256_set1_epi32(lo);
         let hiv = _mm256_set1_epi32(hi);
-        let mut i = 0;
-        while i + 8 <= n {
+        // Two vectors per trip. The body is three or five instructions and the
+        // loop's own bookkeeping two, so one vector per trip spent a third of
+        // the loop on the counter. `n` is a transform dimension -- 4, 8, 16 or
+        // 32 -- so the pair covers everything from 16 up and the single-vector
+        // arm below finishes 8 and any odd remainder.
+        let one = |i: usize| {
             let v = unsafe { _mm256_loadu_si256(src.add(i) as *const __m256i) };
             let mut r = _mm256_sra_epi32(_mm256_add_epi32(v, addv), sh);
             if CLIP {
                 r = _mm256_min_epi32(_mm256_max_epi32(r, lov), hiv);
             }
             unsafe { _mm256_storeu_si256(dst.add(i) as *mut __m256i, r) };
+        };
+        let mut i = 0;
+        while i + 16 <= n {
+            one(i);
+            one(i + 8);
+            i += 16;
+        }
+        while i + 8 <= n {
+            one(i);
             i += 8;
         }
     }
@@ -270,14 +288,23 @@ mod x86 {
         let sh = _mm_cvtsi32_si128(shift as i32);
         let lov = _mm_set1_epi32(lo);
         let hiv = _mm_set1_epi32(hi);
-        let mut i = 0;
-        while i + 4 <= n {
+        // Two vectors per trip, as in the AVX2 twin.
+        let one = |i: usize| {
             let v = unsafe { _mm_loadu_si128(src.add(i) as *const __m128i) };
             let mut r = _mm_sra_epi32(_mm_add_epi32(v, addv), sh);
             if CLIP {
                 r = _mm_min_epi32(_mm_max_epi32(r, lov), hiv);
             }
             unsafe { _mm_storeu_si128(dst.add(i) as *mut __m128i, r) };
+        };
+        let mut i = 0;
+        while i + 8 <= n {
+            one(i);
+            one(i + 4);
+            i += 8;
+        }
+        while i + 4 <= n {
+            one(i);
             i += 4;
         }
     }
@@ -324,7 +351,7 @@ pub fn accum(out: &mut [i32], src: &[i32], s_in: usize, tab: &[i16], tstep: usiz
         // callers hoist it above their loops. This is that hoist: the answer
         // cannot change during a run, so it is computed once per process.
         if ok && use_kernel() {
-            if census::enabled() {
+            if census::ALWAYS {
                 census::bump(&census::ITX_ACCUM_SIMD, 1);
             }
             // SAFETY: `ok` covers every load and store the kernel makes.
@@ -347,7 +374,7 @@ pub fn accum(out: &mut [i32], src: &[i32], s_in: usize, tab: &[i16], tstep: usiz
             return;
         }
     }
-    if census::enabled() {
+    if census::ALWAYS {
         census::bump(&census::ITX_ACCUM_SCALAR, 1);
     }
     accum_scalar(out, src, s_in, tab, tstep, k0, kstep, nz, len);
@@ -368,6 +395,13 @@ pub fn butterfly_scalar(out: &mut [i32], odd: &[i32], n: usize) {
     }
 }
 
+/// `#[cold]`: the SIMD guard above it succeeds on every block of a conformant
+/// stream -- the `*_SCALAR` census counters read 0 across the corpus -- so this
+/// is the fallback for a shape the kernels decline, not a path decode takes.
+/// Inlined it padded the dispatcher, which IS on the hot path, with a body that
+/// never runs. Same reason `Cabac::refill_tail` is out of line.
+#[cold]
+#[inline(never)]
 /// Scalar twin of [`shift_clip`].
 pub fn shift_clip_scalar<const CLIP: bool>(dst: &mut [i32], src: &[i32], n: usize, shift: u32, lo: i32, hi: i32) {
     let add = 1i32 << (shift - 1);
@@ -386,7 +420,7 @@ pub fn shift_clip<const CLIP: bool>(dst: &mut [i32], src: &[i32], n: usize, shif
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
         if dst.len() >= n && src.len() >= n && use_kernel() && n % 4 == 0 && n >= 4 {
-            if census::enabled() {
+            if census::ALWAYS {
                 census::bump(&census::ITX_SHIFT_SIMD, 1);
             }
             // SAFETY: both slices hold `n` elements, `n` a multiple of 4
@@ -401,7 +435,7 @@ pub fn shift_clip<const CLIP: bool>(dst: &mut [i32], src: &[i32], n: usize, shif
             return;
         }
     }
-    if census::enabled() {
+    if census::ALWAYS {
         census::bump(&census::ITX_SHIFT_SCALAR, 1);
     }
     shift_clip_scalar::<CLIP>(dst, src, n, shift, lo, hi);
@@ -425,7 +459,7 @@ pub fn accum_butterfly(out: &mut [i32], src: &[i32], s_in: usize, tab: &[i16], t
         let kmax = nz.saturating_sub(1);
         let ok = out.len() >= n && matches!(half, 4 | 8 | 16) && (nz <= 1 || (src.len() > kmax * s_in && tab.len() >= kmax * tstep * 32 + half));
         if ok && use_kernel() {
-            if census::enabled() {
+            if census::ALWAYS {
                 census::bump(&census::ITX_FUSED_SIMD, 1);
             }
             // SAFETY: `ok` covers every access the kernel makes.
@@ -448,7 +482,7 @@ pub fn accum_butterfly(out: &mut [i32], src: &[i32], s_in: usize, tab: &[i16], t
             return;
         }
     }
-    if census::enabled() {
+    if census::ALWAYS {
         census::bump(&census::ITX_FUSED_SCALAR, 1);
     }
     accum_butterfly_scalar(out, src, s_in, tab, tstep, nz, n);

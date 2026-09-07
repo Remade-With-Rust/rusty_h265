@@ -192,16 +192,24 @@ pub struct ScanSet {
     /// bounds check on `pos[n]` goes away for every scanned position.
     pub pos: &'static [(u8, u8); 16],
     pub pos_inv: &'static [u8; 16],
+    /// The significance-context rows for this scan (§9.3.4.2.5): the 4x4-block
+    /// map, and the neighbour term indexed by `prevCsbf`. Both were separate
+    /// `[..][scan_idx]` lookups in the per-sub-block loop, each re-proving a
+    /// bound the `ScanSet` selection has already settled.
+    pub sig_4x4: &'static [u8; 16],
+    pub sig_nb: &'static [[u8; 16]; 4],
 }
 
 macro_rules! scan_set {
-    ($sb:ident, $inv:ident, $bb:ident, $pos:ident, $pinv:ident) => {
+    ($sb:ident, $inv:ident, $bb:ident, $pos:ident, $pinv:ident, $si:expr) => {
         ScanSet {
             sb: &$sb,
             sb_inv: &$inv,
             sb_bbox: &$bb,
             pos: &$pos,
             pos_inv: &$pinv,
+            sig_4x4: &SIG_CTX_4X4_BY_SCAN[$si],
+            sig_nb: &SIG_NB[$si],
         }
     };
 }
@@ -209,24 +217,24 @@ macro_rules! scan_set {
 /// `SCAN_SETS[log2SubBlockSize][scanIdx]`.
 static SCAN_SETS: [[ScanSet; 3]; 4] = [
     [
-        scan_set!(ONE, INV_ONE, BBOX_ONE, DIAG_4X4, INV_DIAG_4X4),
-        scan_set!(ONE, INV_ONE, BBOX_ONE, HORIZ_4X4, INV_HORIZ_4X4),
-        scan_set!(ONE, INV_ONE, BBOX_ONE, VERT_4X4, INV_VERT_4X4),
+        scan_set!(ONE, INV_ONE, BBOX_ONE, DIAG_4X4, INV_DIAG_4X4, 0),
+        scan_set!(ONE, INV_ONE, BBOX_ONE, HORIZ_4X4, INV_HORIZ_4X4, 1),
+        scan_set!(ONE, INV_ONE, BBOX_ONE, VERT_4X4, INV_VERT_4X4, 2),
     ],
     [
-        scan_set!(DIAG_2X2, INV_DIAG_2X2, BBOX_DIAG_2X2, DIAG_4X4, INV_DIAG_4X4),
-        scan_set!(HORIZ_2X2, INV_HORIZ_2X2, BBOX_HORIZ_2X2, HORIZ_4X4, INV_HORIZ_4X4),
-        scan_set!(VERT_2X2, INV_VERT_2X2, BBOX_VERT_2X2, VERT_4X4, INV_VERT_4X4),
+        scan_set!(DIAG_2X2, INV_DIAG_2X2, BBOX_DIAG_2X2, DIAG_4X4, INV_DIAG_4X4, 0),
+        scan_set!(HORIZ_2X2, INV_HORIZ_2X2, BBOX_HORIZ_2X2, HORIZ_4X4, INV_HORIZ_4X4, 1),
+        scan_set!(VERT_2X2, INV_VERT_2X2, BBOX_VERT_2X2, VERT_4X4, INV_VERT_4X4, 2),
     ],
     [
-        scan_set!(DIAG_4X4, INV_DIAG_4X4, BBOX_DIAG_4X4, DIAG_4X4, INV_DIAG_4X4),
-        scan_set!(HORIZ_4X4, INV_HORIZ_4X4, BBOX_HORIZ_4X4, HORIZ_4X4, INV_HORIZ_4X4),
-        scan_set!(VERT_4X4, INV_VERT_4X4, BBOX_VERT_4X4, VERT_4X4, INV_VERT_4X4),
+        scan_set!(DIAG_4X4, INV_DIAG_4X4, BBOX_DIAG_4X4, DIAG_4X4, INV_DIAG_4X4, 0),
+        scan_set!(HORIZ_4X4, INV_HORIZ_4X4, BBOX_HORIZ_4X4, HORIZ_4X4, INV_HORIZ_4X4, 1),
+        scan_set!(VERT_4X4, INV_VERT_4X4, BBOX_VERT_4X4, VERT_4X4, INV_VERT_4X4, 2),
     ],
     [
-        scan_set!(DIAG_8X8, INV_DIAG_8X8, BBOX_DIAG_8X8, DIAG_4X4, INV_DIAG_4X4),
-        scan_set!(HORIZ_8X8, INV_HORIZ_8X8, BBOX_HORIZ_8X8, HORIZ_4X4, INV_HORIZ_4X4),
-        scan_set!(VERT_8X8, INV_VERT_8X8, BBOX_VERT_8X8, VERT_4X4, INV_VERT_4X4),
+        scan_set!(DIAG_8X8, INV_DIAG_8X8, BBOX_DIAG_8X8, DIAG_4X4, INV_DIAG_4X4, 0),
+        scan_set!(HORIZ_8X8, INV_HORIZ_8X8, BBOX_HORIZ_8X8, HORIZ_4X4, INV_HORIZ_4X4, 1),
+        scan_set!(VERT_8X8, INV_VERT_8X8, BBOX_VERT_8X8, VERT_4X4, INV_VERT_4X4, 2),
     ],
 ];
 
