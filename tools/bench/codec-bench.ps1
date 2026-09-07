@@ -91,7 +91,14 @@ param(
     # `decode_ms=`; ffmpeg has no equivalent, so a mixed comparison falls back
     # to the wall clock for BOTH arms rather than comparing unlike quantities.
     [string]$OursMs = "",
-    [string]$RefMs = ""
+    [string]$RefMs = "",
+    # Unit scale for the captured group, to ms. ffmpeg's `-benchmark` prints
+    # `rtime=0.198s`, so the ffmpeg comparison needs `-RefMsScale 1000`. Without
+    # this the published table cannot be reproduced from this file, which is
+    # exactly what happened once: the parameter was added here, the mirror was
+    # synced from an older copy, and the copy-back silently reverted it.
+    [double]$OursMsScale = 1.0,
+    [double]$RefMsScale = 1.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -201,7 +208,8 @@ foreach ($stream in $StreamList) {
                 $skip = "self-reported time requested but not found in output"
                 break
             }
-            $ta.Add([double]$sa.Groups[1].Value); $tb.Add([double]$sb.Groups[1].Value)
+            $ta.Add([double]$sa.Groups[1].Value * $RefMsScale)
+            $tb.Add([double]$sb.Groups[1].Value * $OursMsScale)
         }
         else {
             $ta.Add($ra.ms); $tb.Add($rb.ms)
