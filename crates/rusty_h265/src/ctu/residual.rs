@@ -148,33 +148,71 @@ impl<'a> SliceDecoder<'a> {
             // not a `%`. Written as `%` it was a hardware divide per run.
             let run = 4 >> ss;
             let rmask = run - 1;
+            // Gather a SPAN of consecutive available runs at a time, not a run.
+            //
+            // Availability is derived per run, but the copy does not have to be.
+            // A run is four samples (two for chroma), and
+            // `top[k..end].copy_from_slice(..)` on a slice that short is a
+            // runtime-length `memcpy` CALL -- up to sixteen of them per
+            // transform block per component, which `memcpy_census.py` ranked as
+            // the densest remaining copy site in the decoder. Runs are almost
+            // always all available (the picture interior), so accumulating them
+            // and flushing at each transition turns those sixteen 8-byte calls
+            // into ONE of up to 128 bytes, and leaves the edge cases as the only
+            // place more than one flush happens.
+            //
+            // `reset` still pre-clears the availability flags, so a span that is
+            // never flushed is already false. Removing that pre-clear and
+            // writing the false runs instead was tried and measured 0.982x on
+            // intra-heavy content: it replaced two long fills with thirty-two
+            // short ones, which is this same defect in the other direction.
             let mut k = 0;
+            let mut span: Option<usize> = None;
             while k < 2 * n {
                 let end = (k + run - ((yb + k) & rmask)).min(2 * n);
                 if avail(st, (xb as i32 - 1) << ss, ((yb + k) as i32) << ss) {
-                    // Masking these to `& 63` (both are `[_; 64]` and
-                    // `j < 2n <= 64`) retired NO guard and cost 2 instructions:
-                    // LLVM already proves this pair from the loop bound.
-                    for j in k..end {
-                        refs.left[j] = plane.get(xb - 1, yb + j);
-                        refs.left_avail[j] = true;
-                    }
+                    span.get_or_insert(k);
                 } else {
                     all_avail = false;
+                    if let Some(a) = span.take() {
+                        // The left column is strided, so the samples are a loop
+                        // either way; it is the flag write that coalesces.
+                        for j in a..k {
+                            refs.left[j] = plane.get(xb - 1, yb + j);
+                        }
+                        refs.left_avail[a..k].fill(true);
+                    }
                 }
                 k = end;
             }
+            if let Some(a) = span.take() {
+                for j in a..2 * n {
+                    refs.left[j] = plane.get(xb - 1, yb + j);
+                }
+                refs.left_avail[a..2 * n].fill(true);
+            }
+            // NOT hoisted out of the loop: at `yb == 0` there is no row above,
+            // and `(yb - 1) * stride` underflows. No run is available there, so
+            // the slice is never USED -- but it must not be FORMED either.
+            let top_row = || &plane.data[(yb - 1) * plane.stride..];
             let mut k = 0;
+            let mut span: Option<usize> = None;
             while k < 2 * n {
                 let end = (k + run - ((xb + k) & rmask)).min(2 * n);
                 if avail(st, ((xb + k) as i32) << ss, (yb as i32 - 1) << ss) {
-                    let row = &plane.data[(yb - 1) * plane.stride..];
-                    refs.top[k..end].copy_from_slice(&row[xb + k..xb + end]);
-                    refs.top_avail[k..end].fill(true);
+                    span.get_or_insert(k);
                 } else {
                     all_avail = false;
+                    if let Some(a) = span.take() {
+                        refs.top[a..k].copy_from_slice(&top_row()[xb + a..xb + k]);
+                        refs.top_avail[a..k].fill(true);
+                    }
                 }
                 k = end;
+            }
+            if let Some(a) = span.take() {
+                refs.top[a..2 * n].copy_from_slice(&top_row()[xb + a..xb + 2 * n]);
+                refs.top_avail[a..2 * n].fill(true);
             }
             if avail(st, (xb as i32 - 1) << ss, (yb as i32 - 1) << ss) {
                 refs.corner = plane.get(xb - 1, yb - 1);
@@ -551,7 +589,7 @@ impl<'a> SliceDecoder<'a> {
                 Some(sf) if !(transform_skip && n > 4) => {
                     let size_id = log2 - 2;
                     let matrix_id = if self.cu_intra { 0 } else { 3 } + c_idx;
-                    Some(&sf.f[size_id][matrix_id])
+                    Some(sf.get(size_id, matrix_id))
                 }
                 _ => None,
             };

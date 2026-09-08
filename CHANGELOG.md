@@ -4,6 +4,66 @@ All notable changes to `rusty_h265` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-07
+
+Conformance unchanged: **147/147** JCT-VC `HEVC_v1` bit-exact, SEI 100/100, on
+both the AVX2 and SSE4.1 rungs. A memory-copy release: **1.078x** mainstream
+inter, **1.086x** 10-bit, **1.158x** deblocking-heavy, **1.075x** weighted
+prediction and **1.024x** all-intra over 0.5.0, measured against the 0.5.0 binary
+in the same session with 21 pairs each -- every row a verdict. Weighted
+prediction is now **1.05x FASTER than ffmpeg** (21/21, z = 4.58), the first
+stream we win outright.
+
+### Added
+
+- **`tools/hevc/memcpy_census.py`** -- every `memcpy`/`memset`/`memmove`/
+  `__rust_alloc` call the shipping build actually emits, attributed to its symbol
+  and source line, with the length resolved when it is an immediate. Source grep
+  finds only the copies you wrote; this finds the ones the optimiser made, and
+  the ones whose RUNTIME length turned them into calls. It runs a self-test on
+  every invocation, because a probe whose good news is a zero is indistinguishable
+  from a broken one -- which happened: a `` collapsed into a literal backspace
+  byte and the census cheerfully reported zero copies across four crates.
+
+### Changed
+
+- **The picture pool no longer clears the buffer it recycles.** At a 99% hit rate
+  the per-picture stage still cost 3.4% of decode, all of it the 2.76 MB `memset`.
+  Coverage is now tracked per coding tree block (set AFTER the block decodes, so a
+  slice that dies mid-block leaves it uncovered) and only uncovered blocks are
+  zeroed, before the in-loop filters read across block boundaries. Byte-identical
+  on every path, not just conformant ones.
+- **Three short-runtime-length copies dispatched to constant widths** -- the
+  per-4x4 map writer (rows of 2 to 16 entries, 8-10 maps per coding unit, nine
+  memsets inlined into `coding_quadtree`), the intra reference gather (a
+  four-sample availability run at a time, now coalesced into spans), and the
+  full-pel motion copy (rows of 8-128 bytes, 71,413 blocks a clip).
+- **The intra reference filter runs in place.** §8.4.4.2.3 "cannot filter in
+  place" only holds if you discard the one sample the 3-tap destroys; keeping it
+  in a register retires two copies per filtered block, a whole write pass, and two
+  128-byte buffers.
+- **Four per-4x4 maps are no longer pre-filled** (230,400 bytes per picture of
+  pure overwrite). Proven by poisoning each with a value that would change the
+  output if read -- 147/147 -- against a control, `nz`, which is genuinely not
+  covered and gives 19/147.
+- **`ScalingFactors` is one flat block** instead of `Vec<Vec<Vec<u8>>>`, which
+  allocated 29 times per picture for 8,160 bytes of sequence-invariant table.
+- **The DPB purge is in place**, replacing a `drain(..).partition(..)` that
+  allocated two vectors and moved every entry, twice per picture, to remove on
+  average less than one.
+- **Output serialisation narrows a row at a time.** It was converting 1,382,400
+  samples per frame one by one; appending through a `Vec` puts a capacity check on
+  every sample and blocks the vectorisation. Worth 5.4% of whole decode on a path
+  no decoder benchmark covers, because they all decode to `-`.
+
+### Fixed
+
+- **The benchmark harness could be aborted by its own allocator guard.** Probing a
+  foreign reference arm (ffmpeg) invokes it with our CLI's argument shape; on
+  Windows PowerShell `2>&1` against a native command wraps stderr in error records,
+  which under `Stop` killed the run before a single measurement. The guard's teeth
+  are unchanged -- any arm that prints `alloc=` must print `rusty`.
+
 ## [0.5.0] - 2026-09-07
 
 Conformance unchanged: 147/147 JCT-VC `HEVC_v1` bit-exact, SEI 100/100, on both

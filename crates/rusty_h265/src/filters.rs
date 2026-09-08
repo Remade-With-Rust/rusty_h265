@@ -14,7 +14,7 @@ use crate::ps::{Pps, Sps};
 use crate::tables::{BETA_TABLE, CHROMA_QP_420, TC_TABLE};
 
 /// Runs deblocking then SAO on the finished picture.
-pub fn apply_in_loop_filters(cur: &mut CurrentPicture) {
+pub fn apply_in_loop_filters(cur: &mut CurrentPicture, scratch: &mut crate::decoder::FilterScratch) {
     // Bring-up switch: `RH265_NO_LF=1` skips both filters (compare against
     // `ffmpeg -skip_loop_filter all`).
     if std::env::var_os("RH265_NO_LF").is_some() {
@@ -36,7 +36,7 @@ pub fn apply_in_loop_filters(cur: &mut CurrentPicture) {
     }
     let any_deblock = cur.state.ctb_filter.iter().any(|f| !f.deblock_disabled);
     if any_deblock {
-        let (bs_v, bs_h) = (&mut cur.deblock_bs_v, &mut cur.deblock_bs_h);
+        let (bs_v, bs_h) = (&mut scratch.bs_v, &mut scratch.bs_h);
         deblock(&mut cur.pic.planes, &cur.state, &sps, &pps, bs_v, bs_h);
     }
     let any_sao = sps.sao_enabled && cur.state.ctb_filter.iter().any(|f| f.sao_luma || f.sao_chroma);
@@ -53,7 +53,7 @@ pub fn apply_in_loop_filters(cur: &mut CurrentPicture) {
         if has_bypass {
             accel::census::arm(&accel::census::RT_SAO_PIC_BYPASS);
         }
-        let scratch = &mut cur.sao_scratch;
+        let scratch = &mut scratch.sao;
         sao(&mut cur.pic.planes, &cur.state, &sps, &pps, scratch, has_bypass);
     }
 }
@@ -372,6 +372,11 @@ fn scalar_sao() -> bool {
 /// - **Neighbour availability.** Only samples on the one-sample ring at the
 ///   edge of a coding tree block can have an unusable neighbour. The interior
 ///   — which is all but `4·cs` of `cs²` samples — needs no check whatsoever.
+/// Diagnostic: how much of each plane the narrowed SAO copy actually touches.
+pub static SAO_COPIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SAO_PLANE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SAO_SPANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn sao(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, scratch: &mut Vec<u16>, has_bypass: bool) {
     crate::prof_scope!(crate::prof::Stage::Sao);
     // Hoisted once per picture: the kernels take a whole rectangle, so they are
@@ -402,9 +407,87 @@ fn sao(planes: &mut [Plane; 3], st: &PicState, sps: &Sps, pps: &Pps, scratch: &m
         if !(0..st.ctb_h * st.ctb_w).any(|rs| st.slice_addr[rs] >= 0 && st.sao[rs][c].type_idx != 0) {
             continue;
         }
-        // The deblocked picture, reused across planes and pictures.
-        scratch.clear();
-        scratch.extend_from_slice(&planes[c].data);
+        // The deblocked samples SAO reads -- but only the ones it can actually
+        // read, not the whole plane.
+        //
+        // SAO filters from unfiltered neighbours while writing filtered
+        // samples, so it needs a pristine copy of what it reads. That copy used
+        // to be the entire component: 1.84 MB of luma and 0.46 MB per chroma
+        // plane, every picture with any SAO at all, measured at 2.9% of decode
+        // on its own.
+        //
+        // Two facts make almost all of it unnecessary. Only the coding tree
+        // blocks that actually apply SAO are ever read -- 43,094 of 209,280
+        // component-CTBs on a 20-second clip, 21% -- and edge offset reaches
+        // exactly one sample outside the block. So copying each active block
+        // plus a one-sample halo copies what is read and nothing else.
+        //
+        // The pre-pass has to finish before any filtering starts: halos of
+        // neighbouring active blocks overlap, and a halo taken after its
+        // neighbour was filtered would capture filtered samples. Copying twice
+        // where they overlap is harmless; copying late is not.
+        //
+        // `scratch` is sized to the largest plane and never shrunk, so this
+        // resize is a no-op after the first picture. Shrinking it per component
+        // would make the regrow a full zero-fill of the luma plane -- exactly
+        // the memset this is removing.
+        {
+            crate::prof_scope!(crate::prof::Stage::SaoCopy);
+            let need = planes[c].data.len();
+            if std::env::var_os("RH265_SAOBYTES").is_some() {
+                SAO_PLANE.fetch_add(need as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            if scratch.len() < need {
+                scratch.resize(need, 0);
+            }
+            // Coalesced per coding-tree-block ROW, not per block.
+            //
+            // The first version of this copied each active block's footprint
+            // separately. The bytes fell to 25.3% of the plane exactly as
+            // intended -- and it measured NO FASTER, because it turned 872 large
+            // copies into 2,441,604 spans of 62 samples. `copy_from_slice` with
+            // a runtime length is a real `call memcpy`; at 124 bytes a call the
+            // overhead is the whole cost, and the data saving bought nothing.
+            //
+            // So: one span per plane row, covering the union of the active
+            // blocks on that block-row, and a single contiguous copy when that
+            // union is the full width. Fewer, longer copies. When every
+            // block-row is fully active this degenerates to exactly the
+            // whole-plane copy it replaced, so it is never worse.
+            let bs = ctb >> ss;
+            for ry in 0..st.ctb_h {
+                let (mut lo, mut hi) = (usize::MAX, 0usize);
+                for rx in 0..st.ctb_w {
+                    let rs = ry * st.ctb_w + rx;
+                    if st.slice_addr[rs] < 0 || st.sao[rs][c].type_idx == 0 {
+                        continue;
+                    }
+                    lo = lo.min((rx * bs).saturating_sub(1));
+                    hi = hi.max((rx * bs + bs + 1).min(pw));
+                }
+                if lo == usize::MAX {
+                    continue; // no SAO anywhere on this block-row
+                }
+                let y0 = (ry * bs).saturating_sub(1);
+                let y1 = (ry * bs + bs + 1).min(ph);
+                if lo == 0 && hi == pw && pstride == pw {
+                    // The span is whole rows and the rows are contiguous: one
+                    // copy for the entire band.
+                    let (a, b) = (y0 * pstride, y1 * pstride);
+                    scratch[a..b].copy_from_slice(&planes[c].data[a..b]);
+                } else {
+                    let w = hi - lo;
+                    for y in y0..y1 {
+                        let a = y * pstride + lo;
+                        scratch[a..a + w].copy_from_slice(&planes[c].data[a..a + w]);
+                    }
+                }
+                if std::env::var_os("RH265_SAOBYTES").is_some() {
+                    SAO_COPIED.fetch_add(((y1 - y0) * (hi - lo)) as u64, std::sync::atomic::Ordering::Relaxed);
+                    SAO_SPANS.fetch_add(if lo == 0 && hi == pw && pstride == pw { 1 } else { (y1 - y0) as u64 }, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
         let src = &scratch[..];
         let dst = &mut planes[c];
         let cs = ctb >> ss;

@@ -41,6 +41,7 @@ impl McScratch {
     /// run, so the clamp costs three decisions per row rather than one per
     /// sample.
     pub fn pad_footprint(&mut self, plane: &Plane, x0: i32, y0: i32, fw: usize, fh: usize) {
+        crate::prof_scope!(crate::prof::Stage::Pad);
         // `pad` is built at the largest footprint HEVC can ask for -- a 64x64
         // prediction block plus the 7-tap margin, which is exactly
         // `(64 + 7) * (64 + 7)` -- so this can only ever be a no-op. It is a

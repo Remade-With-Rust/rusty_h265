@@ -63,10 +63,20 @@ pub enum Stage {
     /// writing the picture. Nests inside `Mc`. Measured to price fusing it into
     /// the interpolation's final pass.
     Combine,
+    /// Building the edge-clamped reference footprint into scratch, for the ~12%
+    /// of prediction blocks whose filter window hangs off the picture. Nests
+    /// inside `Mc`. Priced to decide whether padding the reference planes once
+    /// per picture would be cheaper than copying per block.
+    Pad,
+    /// Copying a deblocked plane aside so SAO can read unfiltered samples while
+    /// writing filtered ones. Nests inside `Sao`.
+    SaoCopy,
+    /// Allocating and zeroing one picture's sample planes. Nests inside `Dpb`.
+    PicAlloc,
 }
 
-pub const N: usize = 9;
-const NAMES: [&str; N] = ["parse", "intra", "inter", "transform", "deblock", "sao", "dpb", "  |- mc", "  |- combine"];
+pub const N: usize = 12;
+const NAMES: [&str; N] = ["parse", "intra", "inter", "transform", "deblock", "sao", "dpb", "  |- mc", "  |- combine", "  |- pad", "  |- sao copy", "  |- pic alloc"];
 /// Which stages run INSIDE `Parse`. `Parse` wraps a whole CTU, so its raw total
 /// includes prediction and transform; reporting all six as if they were
 /// siblings sums to 124% and prints a residue of zero, which is what the first
@@ -77,7 +87,11 @@ const NESTED_IN_PARSE: [Stage; 3] = [Stage::Intra, Stage::Inter, Stage::Transfor
 const NESTED_IN_INTER: [Stage; 1] = [Stage::Mc];
 /// `Combine` nests inside `Mc`; both are breakdown lines under `Inter` and
 /// neither is added to the column again.
-const NESTED_IN_MC: [Stage; 1] = [Stage::Combine];
+const NESTED_IN_MC: [Stage; 2] = [Stage::Combine, Stage::Pad];
+/// `SaoCopy` nests inside `Sao`.
+const NESTED_IN_SAO: [Stage; 1] = [Stage::SaoCopy];
+/// `PicAlloc` nests inside `Dpb`; the remainder of `Dpb` is the per-4x4 maps.
+const NESTED_IN_DPB: [Stage; 1] = [Stage::PicAlloc];
 
 static NS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
 static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
@@ -125,10 +139,7 @@ pub struct Scope {
 impl Scope {
     #[inline(always)]
     fn start_raw() -> Scope {
-        Scope {
-            t: std::time::Instant::now(),
-            stage: 0,
-        }
+        Scope { t: std::time::Instant::now(), stage: 0 }
     }
 
     #[inline(always)]
@@ -142,10 +153,7 @@ impl Scope {
     #[inline(always)]
     pub fn new(stage: Stage) -> Option<Scope> {
         if enabled() {
-            Some(Scope {
-                t: std::time::Instant::now(),
-                stage: stage as usize,
-            })
+            Some(Scope { t: std::time::Instant::now(), stage: stage as usize })
         } else {
             None
         }
@@ -171,6 +179,8 @@ pub fn report(total_ns: u64) -> String {
     let nested: u64 = NESTED_IN_PARSE.iter().map(|s| NS[*s as usize].load(Ordering::Relaxed)).sum();
     let in_inter: u64 = NESTED_IN_INTER.iter().map(|s| NS[*s as usize].load(Ordering::Relaxed)).sum();
     let in_mc: u64 = NESTED_IN_MC.iter().map(|s| NS[*s as usize].load(Ordering::Relaxed)).sum();
+    let in_sao: u64 = NESTED_IN_SAO.iter().map(|s| NS[*s as usize].load(Ordering::Relaxed)).sum();
+    let in_dpb: u64 = NESTED_IN_DPB.iter().map(|s| NS[*s as usize].load(Ordering::Relaxed)).sum();
     for i in 0..N {
         let raw = NS[i].load(Ordering::Relaxed);
         // `parse` is reported EXCLUSIVE of the stages nested inside it, so the
@@ -181,6 +191,10 @@ pub fn report(total_ns: u64) -> String {
             raw.saturating_sub(in_inter)
         } else if i == Stage::Mc as usize {
             raw.saturating_sub(in_mc)
+        } else if i == Stage::Sao as usize {
+            raw.saturating_sub(in_sao)
+        } else if i == Stage::Dpb as usize {
+            raw.saturating_sub(in_dpb)
         } else {
             raw
         };

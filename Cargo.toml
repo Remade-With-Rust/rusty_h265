@@ -10,7 +10,7 @@ resolver = "2"
 members = ["crates/rusty_h265", "crates/rusty_h265-accel"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/rusty_h265"
@@ -19,7 +19,7 @@ authors = ["Mata Network"]
 rust-version = "1.85"
 
 [workspace.dependencies]
-rusty_h265-accel = { path = "crates/rusty_h265-accel", version = "0.5.0", default-features = false }
+rusty_h265-accel = { path = "crates/rusty_h265-accel", version = "0.6.0", default-features = false }
 # The safe GlobalAlloc surface. OPTIONAL and binary-only: a library must never
 # hijack a downstream binary's allocator choice.
 rusty_alloc-api = "=1.1.6"

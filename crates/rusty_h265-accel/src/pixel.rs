@@ -107,6 +107,33 @@ fn add_residual_scalar(dst: &mut [u16], dst_stride: usize, res: &[i32], w: usize
 // took `copy_block` from 56 instructions to 1, which is the tell: the work
 // moved behind a jump instead of leaving the hot path.
 fn copy_block_scalar(dst: &mut [u16], dst_stride: usize, src: &[u16], src_stride: usize, w: usize, h: usize) {
+    // The row width is dispatched to a CONSTANT before it is copied.
+    //
+    // `copy_from_slice` with a runtime length is an opaque `call memcpy`, and
+    // these rows are prediction-block widths: 4 to 64 samples, so 8 to 128
+    // BYTES. At that size the call is the whole cost -- and `copy_block` runs
+    // 71,413 times on a 20-second clip, once per full-pel uni-predicted block
+    // per component, each doing `h` of them. A constant length inlines to one
+    // to four vector load/store pairs instead.
+    macro_rules! rows {
+        ($k:literal) => {{
+            for y in 0..h {
+                let (d, s) = (y * dst_stride, y * src_stride);
+                if let (Some(a), Some(b)) = (dst[d..].first_chunk_mut::<$k>(), src[s..].first_chunk::<$k>()) {
+                    *a = *b;
+                }
+            }
+            return;
+        }};
+    }
+    match w {
+        4 => rows!(4),
+        8 => rows!(8),
+        16 => rows!(16),
+        32 => rows!(32),
+        64 => rows!(64),
+        _ => {}
+    }
     for y in 0..h {
         dst[y * dst_stride..y * dst_stride + w].copy_from_slice(&src[y * src_stride..y * src_stride + w]);
     }

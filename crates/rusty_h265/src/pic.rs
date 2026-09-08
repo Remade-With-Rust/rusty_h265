@@ -77,6 +77,12 @@ pub struct PicState {
     pub slice_addr: Vec<i32>,
     /// Per CTB (raster): index into the picture's slice header list.
     pub ctb_slice: Vec<u16>,
+    /// Per CTB (raster): the CTB was decoded and every one of its samples
+    /// written. Set AFTER `decode_ctu` returns, so a slice that fails partway
+    /// through a CTB leaves it false. `Picture::reuse` no longer clears the
+    /// sample planes, and this is what says which of them still hold the
+    /// previous picture -- see `Decoder::clear_uncovered`.
+    pub ctb_done: Vec<bool>,
     /// Per CTB (raster): tile id. Shared for the same reason as [`zs`](Self::zs).
     pub tile_id: std::sync::Arc<[u32]>,
     /// Per 4×4: `CuPredMode` (PRED_*).
@@ -200,6 +206,61 @@ impl PicState {
         Self::with_tables(sps, &SeqTables::build(sps, tiles))
     }
 
+    /// Re-arm an existing state for a new picture of the same geometry.
+    ///
+    /// Returns false if the shape changed, in which case the caller builds a
+    /// fresh one. Every map is refilled with the value `new` would have given
+    /// it -- this recycles the twelve allocations, not their contents. Same
+    /// reasoning as `Picture::reuse`: a fresh `vec![v; n]` pays a mapping and a
+    /// page fault per page the decoder later touches, where refilling warm
+    /// pages is a `memset` the hardware is good at.
+    pub fn reuse(&mut self, sps: &Sps, t: &SeqTables) -> bool {
+        let w4 = (sps.width as usize).div_ceil(4);
+        let h4 = (sps.height as usize).div_ceil(4);
+        let ctb_w = sps.pic_width_in_ctbs as usize;
+        let ctb_h = sps.pic_height_in_ctbs as usize;
+        if (self.w4, self.h4, self.ctb_w, self.ctb_h) != (w4, h4, ctb_w, ctb_h) {
+            return false;
+        }
+        self.width = sps.width as usize;
+        self.height = sps.height as usize;
+        self.log2_ctb = sps.log2_ctb_size as usize;
+        self.zs = std::sync::Arc::clone(&t.zs);
+        self.tile_id = std::sync::Arc::clone(&t.tile_id);
+        self.slice_addr.fill(-1);
+        self.ctb_slice.fill(0);
+        self.ctb_done.fill(false);
+        self.pred_mode.fill(PRED_NONE);
+        // `intra_mode`, `qp_y`, `ct_depth` and `filter_bypass` are NOT reset.
+        //
+        // Every coding unit writes all four over its whole area -- `ct_depth`
+        // and `filter_bypass` before the skip test, `qp_y` from `set_cu_qp`,
+        // and `intra_mode` down all four CU shapes (skip, PCM, intra, inter) --
+        // and every 4x4 of a decoded coding tree block belongs to exactly one
+        // coding unit. Reads are guarded: neighbour queries go through §6.4.1
+        // availability, and the loop filters skip a block whose `slice_addr` is
+        // negative. So the fill was 230,400 bytes per picture of pure overwrite.
+        //
+        // That argument is TESTED, not asserted. Filling them with poison
+        // instead -- `ct_depth` 3 (desynchronises the split_cu_flag context),
+        // `filter_bypass` 1 (disables the loop filters), `intra_mode` 34 (a
+        // different angular direction), `qp_y` -26 (wrong dequantisation AND
+        // deblock strength) -- still decodes 147/147 with SEI 100/100. The
+        // control for that probe is `nz`, which is written only where a
+        // transform block has non-zero coefficients and so is genuinely not
+        // covered: poisoning it gives 19/147 and SEI 12/100. The probe has
+        // teeth, and these four maps are dead fills.
+        //
+        // The ones below stay for exactly that reason -- `nz` is sparse, and
+        // `motion` is not written at all by intra coding units.
+        self.edges.fill(0);
+        self.nz.fill(0);
+        self.motion.fill(Motion::default());
+        self.sao.fill([SaoParams::default(); 3]);
+        self.ctb_filter.fill(CtbFilterParams::default());
+        true
+    }
+
     /// Build a picture's state, taking the sequence-invariant tables as given.
     pub fn with_tables(sps: &Sps, t: &SeqTables) -> Self {
         let width = sps.width as usize;
@@ -223,6 +284,7 @@ impl PicState {
             zs,
             slice_addr: vec![-1; nctb],
             ctb_slice: vec![0; nctb],
+            ctb_done: vec![false; nctb],
             tile_id,
             pred_mode: vec![PRED_NONE; n4],
             intra_mode: vec![1; n4],
@@ -320,15 +382,48 @@ impl PicState {
         let y0 = y >> 2;
         let x1 = (x + w).div_ceil(4);
         let y1 = (y + h).div_ceil(4);
-        // A row at a time, not an element at a time. The inner loop indexed the
-        // map per element, so every 4x4 cell carried its own bounds check; a
-        // row slice is checked once and then filled (a `memset` for the
-        // byte-sized maps). This runs eight to ten times per coding unit --
+        // A row at a time, not an element at a time -- but at a CONSTANT length.
+        //
+        // The row slice is checked once instead of per 4x4 cell, which is why
+        // this beat the element-at-a-time loop it replaced. What it also bought,
+        // invisibly, was a `memset` CALL per row: `fill` on a runtime length is
+        // an opaque call, and these rows are two to sixteen entries, because the
+        // rectangle is a coding unit or prediction unit and the row is its width
+        // over four. This runs eight to ten times per coding unit --
         // `ct_depth`, `filter_bypass`, `pred_mode`, `intra_mode`, `qp_y`,
-        // `motion`, `nz` -- over the same rectangle each time.
+        // `motion`, `nz` -- over the same rectangle each time, which made it the
+        // densest source of tiny `memset` calls in the decoder:
+        // `tools/hevc/memcpy_census.py` found NINE of them inlined into
+        // `coding_quadtree` alone, all runtime-length.
+        //
+        // Dispatching to a fixed-size array reference gives the fill a length
+        // the compiler knows, so it inlines to stores. The widths are
+        // `{1,2,3,4,6,8,12,16}` -- 8x8 to 64x64 square, plus the asymmetric
+        // partitions' quarter and three-quarter widths -- and anything else
+        // falls through to the call, which is correct for a long row.
+        macro_rules! put {
+            ($row:expr, $k:literal) => {{
+                if let Some(a) = $row.first_chunk_mut::<$k>() {
+                    a.fill(v);
+                    continue;
+                }
+            }};
+        }
         for yy in y0..y1 {
             let r = yy * w4;
-            map[r + x0..r + x1].fill(v);
+            let row = &mut map[r + x0..r + x1];
+            match row.len() {
+                1 => put!(row, 1),
+                2 => put!(row, 2),
+                3 => put!(row, 3),
+                4 => put!(row, 4),
+                6 => put!(row, 6),
+                8 => put!(row, 8),
+                12 => put!(row, 12),
+                16 => put!(row, 16),
+                _ => {}
+            }
+            row.fill(v);
         }
     }
 }

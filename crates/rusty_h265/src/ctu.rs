@@ -46,17 +46,36 @@ pub struct CtxStore {
 }
 
 /// `ScalingFactor` (§7.4.5) as raster N×N tables: `[sizeId][matrixId]`.
+///
+/// ONE flat block, not `Vec<Vec<Vec<u8>>>`. The nested shape allocated
+/// twenty-nine times per picture -- four outer, twenty-four inner, plus the
+/// prototype row `vec![...; 4]` clones -- to hold 8,160 bytes that are a pure
+/// function of the scaling list, and then made every lookup chase two pointers.
+/// The tables are `6 * (16 + 64 + 256 + 1024)` bytes end to end.
 pub struct ScalingFactors {
-    pub f: Vec<Vec<Vec<u8>>>,
+    f: Box<[u8; SF_TOTAL]>,
 }
 
+/// Start of each `sizeId`'s six matrices in the flat block.
+const SF_OFF: [usize; 5] = [0, 6 * 16, 6 * (16 + 64), 6 * (16 + 64 + 256), SF_TOTAL];
+const SF_TOTAL: usize = 6 * (16 + 64 + 256 + 1024);
+
 impl ScalingFactors {
+    /// The `n*n` raster table for one `(sizeId, matrixId)`.
+    #[inline]
+    pub fn get(&self, size_id: usize, matrix_id: usize) -> &[u8] {
+        let n = 16usize << (2 * size_id);
+        let a = SF_OFF[size_id] + matrix_id * n;
+        &self.f[a..a + n]
+    }
+
     pub fn new(sl: &ScalingList) -> Self {
-        let mut f = vec![vec![Vec::new(); 6]; 4];
+        let mut f = Box::new([16u8; SF_TOTAL]);
         for size_id in 0..4usize {
             let n = 4usize << size_id;
             for matrix_id in 0..6usize {
-                let mut t = vec![16u8; n * n];
+                let a = SF_OFF[size_id] + matrix_id * n * n;
+                let t = &mut f[a..a + n * n];
                 let list = &sl.lists[size_id][matrix_id];
                 match size_id {
                     0 => {
@@ -81,7 +100,6 @@ impl ScalingFactors {
                         t[0] = sl.dc[size_id - 2][matrix_id];
                     }
                 }
-                f[size_id][matrix_id] = t;
             }
         }
         ScalingFactors { f }
@@ -418,6 +436,7 @@ impl<'a> SliceDecoder<'a> {
             segment_start = false;
 
             self.decode_ctu(rs, x0, y0)?;
+            self.st.ctb_done[rs] = true;
 
             // WPP storage after the second CTB of a row (§9.3.2.3 trigger).
             if wpp && (self.ctb_div.rem(rs) == 1 || (rs > 1 && self.tiles.tile_id[ts] != self.tiles.tile_id[self.tiles.rs_to_ts[rs - 2] as usize])) {

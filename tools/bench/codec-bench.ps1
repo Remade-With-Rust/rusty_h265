@@ -128,7 +128,21 @@ $RefExe = Resolve-Exe $Reference
 # verdict-strength phantom, and the second time this exact trap has fired. An
 # arm nobody checks is an arm that is wrong.
 function Probe-Arm($exe, $label) {
-    $out = (& $exe $StreamList[0] "-" 2>&1 | Out-String)
+    # A FOREIGN arm does not take our CLI's argument shape, and must not be able
+    # to abort the run. Two things conspire: ffmpeg exits non-zero on
+    # `ffmpeg <stream> -`, and on Windows PowerShell `2>&1` against a native
+    # command wraps every stderr line in an ErrorRecord -- which under
+    # `$ErrorActionPreference = "Stop"` killed the whole benchmark before one
+    # measurement was taken. The guard's job is to catch one of OUR binaries
+    # built without `bench-alloc`; a binary that does not answer in our CLI's
+    # shape cannot be one of those, so it is skipped, not fatal. The teeth are
+    # unchanged: any arm that DOES print `alloc=` must print `rusty`.
+    $out = ""
+    try {
+        $out = (& $exe $StreamList[0] "-" 2>&1 | Out-String)
+    } catch {
+        $out = "$_"
+    }
     if ($out -match "alloc=(\w+)" -and $Matches[1] -ne "rusty") {
         throw "$label ($exe) reports alloc=$($Matches[1]); rebuild it with --features bench-alloc. Both arms must run the shipping allocator."
     }

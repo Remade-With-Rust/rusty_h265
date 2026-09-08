@@ -27,6 +27,10 @@ memory-safe FFmpeg alternative, alongside
 - **6,183/6,183 decoded-picture-hash SEI messages verified.** Where a stream
   carries the encoder's own per-picture MD5, we check it -- the codec grading its
   homework against the encoder's, on every picture.
+- **We now beat ffmpeg on one stream.** Against ffmpeg 8.1.2's hand-written
+  assembly, weighted prediction runs **1.05x faster** (21/21 pairs, z = +4.58) and
+  deblocking-heavy content is within **1.10x**; mainstream inter is still 1.67x
+  slower. 0.6.0 is **1.08x-1.16x** over 0.5.0, every row a paired verdict.
 - **The decoder core is `#![forbid(unsafe_code)]`.** Every raw pointer and
   `target_feature` lives in one small crate, `rusty_h265-accel`, behind a
   runtime-dispatched seam. `--no-default-features` compiles a decoder with zero
@@ -48,39 +52,93 @@ Measured against **ffmpeg 8.1.2's native `hevc` decoder** -- hand-written
 assembly, the fastest widely-available software HEVC decoder, and a deliberately
 tougher bar than libde265.
 
-| stream | Mpx | ffmpeg 8.1.2 | **rusty_h265** | ratio | paired verdict |
+| stream | ffmpeg 8.1.2 | 0.5.0 | **0.6.0** | ratio | paired verdict |
 |---|---:|---:|---:|---:|---|
-| 720p 8-bit, mainstream inter | 55.3 | 277 ms | 539 ms | 0.51x | 1/21, z = -4.15 |
-| 720p 10-bit, same content | 55.3 | 321 ms | 652 ms | 0.51x | 0/21, z = -4.58 |
-| deblocking-heavy | 331.8 | 738 ms | 1,313 ms | 0.56x | 0/21, z = -4.58 |
-| weighted prediction | 255.6 | 766 ms | 1,097 ms | 0.70x | 0/21, z = -4.58 |
+| 720p 8-bit, mainstream inter | 267 ms | 492 ms | **447 ms** | 0.60x | 0/21, z = -4.58 |
+| 720p 10-bit, same content | 308 ms | 474 ms | **445 ms** | 0.69x | 0/21, z = -4.58 |
+| deblocking-heavy | 675 ms | 906 ms | **744 ms** | 0.91x | 1/20, z = -4.02 |
+| weighted prediction | 741 ms | 761 ms | **703 ms** | **1.05x** | **21/21, z = +4.58** |
 
-<sub>**We are 1.4x-2.0x slower than ffmpeg, and that is the honest number.**
-Measured 2026-09-07 with [`tools/bench/codec-bench.ps1`](tools/bench/codec-bench.ps1):
-pinned to one core at High priority, arms ABBA-alternated, 21 pairs, paired
-win-rate with a z-score -- every row is a verdict (|z| > 2), not noise. Both arms
-discard their output, and **both arms' decoded frame counts are checked against
-`ffprobe` before any timing is reported**. The resolution floor -- ffmpeg measured
-against itself -- is **0.980x**.</sub>
+<sub>**We are between 1.05x FASTER and 1.67x slower than ffmpeg, and weighted
+prediction is the first stream we win outright.** Measured 2026-09-07 with
+[`tools/bench/codec-bench.ps1`](tools/bench/codec-bench.ps1): pinned to one core
+at High priority, arms ABBA-alternated, 21 pairs, paired win-rate with a z-score
+-- every row is a verdict (|z| > 2), not noise. Both arms discard their output and
+report their own internal decode time (`decode_ms` here, `-benchmark rtime` for
+ffmpeg), which excludes process launch on both sides; frame counts are checked per
+arm before any timing is reported. The resolution floor -- ffmpeg measured against
+itself, same session -- is **0.992x**.</sub>
 
-<sub>**This supersedes the 1.3x-1.8x published for 0.2.0, and the change is a
-measurement fix, not a regression.** That figure came from two defects in our own
-harness, both corrected in this release. (1) It timed with
-`Process.TotalProcessorTime`, which on Windows is kernel TICK ACCOUNTING quantised
-to **15.625 ms** -- every reading in the 0.2.0 table was an exact multiple of it,
-so the differences quoted were two ticks, and the harness's tie-exclusion then
-silently dropped the closest pairs. (2) It charged each arm's process startup to
-that arm, and `ffmpeg.exe` is a **242 MB** binary against our 696 KB, so ffmpeg
-paid ~170 ms of image loading on a ~280 ms decode. Both arms now report their own
-internal decode time (`decode_ms` here, `-benchmark rtime` for ffmpeg), which has
-1 ms resolution and excludes process launch on both sides. The corrected method is
-LESS flattering to us, which is why it is the one we publish.</sub>
+<sub>**The 0.5.0 column was re-measured for this table rather than copied from the
+0.5.0 README, and it does not match what that README published** (0.51x / 0.51x /
+0.56x / 0.70x). Both binaries were run in the same session, on the same box, with
+one method, because that is the only way the two columns can be compared at all --
+a ratio whose denominator drifts more than the improvement is not evidence. Part
+of the apparent jump since 0.5.0 is therefore measurement basis, NOT this release.
+The part that IS this release is the release-over-release table below, which is a
+single-instrument delta and the number we stand behind.</sub>
 
-<sub>Release over release, measured directly against the previous binary on the
-same box with both arms under the shipping allocator: **0.4.0** is **1.155x** on an
-x265-encoded 20 s clip, **1.307x** deblocking-heavy and **1.111x** on conformance
-(15/15, z = 3.87 on each) over 0.3.0; 0.3.0 was 1.059x / 1.031x / 1.034x over
-0.2.0. This decoder started at 3,750 ms on the first row.</sub>
+<sub>**Release over release**, measured directly against the previous binary on the
+same box in the same session, both arms under the shipping allocator, 21 pairs each:
+**0.6.0 over 0.5.0** is **1.078x** mainstream inter (21/21, z = 4.58), **1.086x**
+10-bit (19/21, z = 3.71), **1.158x** deblocking-heavy (21/21, z = 4.58), **1.075x**
+weighted prediction (18/21, z = 3.27) and **1.024x** all-intra (16/21, z = 2.40) --
+every row a verdict. Earlier: **0.4.0** was **1.155x** / **1.307x** / **1.111x**
+over 0.3.0, and 0.3.0 was 1.059x / 1.031x / 1.034x over 0.2.0. This decoder started
+at 3,750 ms on the first row.</sub>
+
+<sub>**0.6.0 is a memory-copy release, and the instrument that found it is in the
+tree** (`tools/hevc/memcpy_census.py`). Grepping the source finds the copies you
+WROTE; it cannot find a stack temporary the optimiser zeroes with a `memset`
+call, a copy it introduced, or -- the expensive one here -- a `slice::fill` or
+`copy_from_slice` whose RUNTIME length turns it into an opaque call. So the
+census reads the emitted assembly instead, attributes every
+`memcpy`/`memset`/`memmove`/`__rust_alloc` to its symbol and source line, and
+resolves the length when it is an immediate. Ten sites came out of it, all
+bit-exact.</sub>
+
+<sub>**The short-runtime-length copy turned out to be a pattern, not an
+accident.** Three independent sites, each written deliberately, each with a
+comment explaining why it beat the element-at-a-time loop it replaced -- and all
+three were right about that, while missing that a runtime length also buys a
+CALL. The per-4x4 map writer filled rows of `cu_size / 4` = **2 to 16 entries**,
+eight to ten maps deep, per coding unit (nine of those memsets were inlined into
+`coding_quadtree`, the hottest recursive function in the decoder); the intra
+reference gather copied one four-sample availability run at a time; the full-pel
+motion copy did one row of 8-128 bytes, 71,413 blocks a clip. One of the comments
+described its `memset` as the achievement. Dispatching the width to a CONSTANT
+(`first_chunk_mut::<K>()` over the handful of block widths HEVC can produce)
+inlines them to stores.</sub>
+
+<sub>**A picture-buffer pool makes allocation free and leaves the CLEAR as the
+entire cost.** With the pool at a 99% hit rate the per-picture stage still priced
+3.4% of decode, and all of it was the 2.76 MB `memset` that re-armed the recycled
+buffer -- 8.3 GB/s, i.e. exactly memory bandwidth, which is the tell that nothing
+else is left. It is gone: decode writes every sample of every coding tree block it
+decodes, so only blocks no slice covered can expose stale samples, and those are
+zeroed before the in-loop filters run. That makes the output byte-identical on
+every path, including a stream whose slices do not cover the picture and one whose
+slice dies mid-block -- not merely identical on conformant input.</sub>
+
+<sub>**Four per-4x4 maps stopped being cleared at all, and the argument was
+tested rather than asserted.** Removing a clear rests on "nothing reads this
+before it is written", which is exactly the kind of claim reading the code gets
+wrong. So each map was filled with POISON chosen to change the output if read
+(`ct_depth` 3 desynchronises the arithmetic decoder's split_cu_flag context,
+`filter_bypass` 1 disables the loop filters, `intra_mode` 34 rotates the angular
+direction, `qp_y` -26 breaks dequantisation and deblock strength): 147/147, SEI
+100/100. That number means nothing without a control, so `nz` -- a fill in the
+same function, but written only where a transform block has non-zero coefficients
+-- was poisoned too: **19/147, SEI 12/100**. The probe has teeth, and 230,400
+bytes per picture of pure overwrite came out.</sub>
+
+<sub>**And the last place we looked was the output path, because every decoder
+benchmark here decodes to `-` and none of them execute the serialiser.** It was
+narrowing 1,382,400 u16 samples a frame one at a time; appending through a `Vec`
+puts a capacity check on every sample, which is what stopped the narrowing from
+vectorising. Serialisation costs **5.4% of whole decode** (15/15, z = 3.87) and is
+now a scratch row plus one `extend_from_slice`. The framework adapter had a
+byte-for-byte copy of the same defect, on the path real users take.</sub>
 
 <sub>0.4.0's two wins both came from the first run of the new stage profiler
 (`--features prof`, `RH265_PROF=1`), after roughly ninety wins had been landed on

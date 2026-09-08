@@ -42,10 +42,6 @@ pub struct RefSamples {
     /// Narrowed `left` / `top` for the planar kernel, same reasoning.
     pub pl: [i16; 33],
     pub pt: [i16; 33],
-    /// Double buffer for the §8.4.4.2.3 smoothing, which cannot filter in
-    /// place. Two more 128-byte locals that were memset per filtered block.
-    pub fl: [u16; 64],
-    pub ft: [u16; 64],
 }
 
 impl RefSamples {
@@ -60,8 +56,6 @@ impl RefSamples {
             refb: [0; 128],
             pl: [0; 33],
             pt: [0; 33],
-            fl: [0; 64],
-            ft: [0; 64],
         }
     }
 
@@ -167,19 +161,29 @@ impl RefSamples {
             }
             return;
         }
-        // Disjoint field borrows: read the neighbours, write the double buffer.
-        let RefSamples { left, top, fl, ft, .. } = self;
+        // In place, with a one-sample history -- no double buffer.
+        //
+        // §8.4.4.2.3 is `(p[i-1] + 2*p[i] + p[i+1] + 2) >> 2`, and the reason
+        // this "cannot filter in place" is that `p[i-1]` has already been
+        // overwritten by the time index `i` is computed. Carrying the ONE value
+        // that is destroyed -- the previous input -- removes that objection: the
+        // forward neighbour `p[i+1]` has not been written yet, and `p[i]` is
+        // read before it is stored. Filtering the buffer directly retires two
+        // `copy_from_slice` calls per filtered block plus the second write pass,
+        // and two 128-byte arrays from this struct.
+        let corner_u = corner as u16;
+        let RefSamples { left, top, .. } = self;
         let new_corner = ((left[0] as i32 + 2 * corner + top[0] as i32 + 2) >> 2) as u16;
-        fl[0] = ((left[1] as i32 + 2 * left[0] as i32 + corner + 2) >> 2) as u16;
-        ft[0] = ((top[1] as i32 + 2 * top[0] as i32 + corner + 2) >> 2) as u16;
-        for i in 1..n2 - 1 {
-            fl[i] = ((left[i + 1] as i32 + 2 * left[i] as i32 + left[i - 1] as i32 + 2) >> 2) as u16;
-            ft[i] = ((top[i + 1] as i32 + 2 * top[i] as i32 + top[i - 1] as i32 + 2) >> 2) as u16;
+        // `p[-1]` is the corner for both runs.
+        let (mut lp, mut tp) = (corner_u, corner_u);
+        for i in 0..n2 - 1 {
+            let (lc, tc) = (left[i], top[i]);
+            left[i] = ((left[i + 1] as i32 + 2 * lc as i32 + lp as i32 + 2) >> 2) as u16;
+            top[i] = ((top[i + 1] as i32 + 2 * tc as i32 + tp as i32 + 2) >> 2) as u16;
+            lp = lc;
+            tp = tc;
         }
-        fl[n2 - 1] = left[n2 - 1];
-        ft[n2 - 1] = top[n2 - 1];
-        left[..n2].copy_from_slice(&fl[..n2]);
-        top[..n2].copy_from_slice(&ft[..n2]);
+        // The last sample is unfiltered -- it has no forward neighbour.
         self.corner = new_corner;
     }
 }
