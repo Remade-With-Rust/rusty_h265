@@ -197,7 +197,7 @@ A complete HEVC **decoder**, written from the specification:
 
 ```toml
 [dependencies]
-rusty_h265 = "0.1"
+rusty_h265 = "0.6"
 ```
 
 ```bash
