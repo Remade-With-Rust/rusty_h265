@@ -22,7 +22,7 @@ rust-version = "1.85"
 rusty_h265-accel = { path = "crates/rusty_h265-accel", version = "0.6.0", default-features = false }
 # The safe GlobalAlloc surface. OPTIONAL and binary-only: a library must never
 # hijack a downstream binary's allocator choice.
-rusty_alloc-api = "=1.1.6"
+rusty_alloc-api = "=2.2.0"
 
 [profile.release]
 opt-level = 3
