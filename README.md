@@ -1,3 +1,7 @@
+### In The Wild with 561 Active Installs
+
+FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com</a>
+
 # rusty_h265
 
 [![crates.io](https://img.shields.io/crates/v/rusty_h265?logo=rust)](https://crates.io/crates/rusty_h265)
