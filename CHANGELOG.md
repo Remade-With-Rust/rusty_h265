@@ -4,6 +4,23 @@ All notable changes to `rusty_h265` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-16
+
+Debug builds only; release output is unchanged (still **147/147** JCT-VC
+`HEVC_v1` bit-exact). `cargo test` in debug now passes end to end.
+
+### Fixed
+
+- **Deblocking:** the SIMD bounds gate required `x >= 4` for horizontal edges
+  too, so every horizontal edge in a picture's left column tripped a
+  `debug_assert!` (and, in release, took the scalar path unnecessarily).
+- **QP wrap:** `wrap_qp`'s assertion bounded the dividend by `2m`; valid
+  streams reach up to `128 + 5*off/2` (< `3m`). Bound and comment corrected.
+- **RExt fallbacks:** `angular`/`angular_t` and `sao_band`/`sao_edge` asserted
+  the conditions under which they deliberately fall back to the scalar twin
+  (i16 headroom past 12-bit, SAO offsets past the i8 LUT). The bounds checks
+  stay asserted; the designed fallback no longer panics.
+
 ## [0.6.0] - 2026-09-07
 
 Conformance unchanged: **147/147** JCT-VC `HEVC_v1` bit-exact, SEI 100/100, on
