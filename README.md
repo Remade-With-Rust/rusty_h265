@@ -31,10 +31,11 @@ memory-safe FFmpeg alternative, alongside
 - **6,183/6,183 decoded-picture-hash SEI messages verified.** Where a stream
   carries the encoder's own per-picture MD5, we check it -- the codec grading its
   homework against the encoder's, on every picture.
-- **We now beat ffmpeg on one stream.** Against ffmpeg 8.1.2's hand-written
-  assembly, weighted prediction runs **1.05x faster** (21/21 pairs, z = +4.58) and
-  deblocking-heavy content is within **1.10x**; mainstream inter is still 1.67x
-  slower. 0.6.0 is **1.08x-1.16x** over 0.5.0, every row a paired verdict.
+- **Faster than ffmpeg on weighted prediction, level on deblocking-heavy and
+  10-bit.** Against ffmpeg 8.1.2's hand-written assembly, single thread, weighted
+  prediction runs **1.37x faster** (20/21 pairs, z = +4.15); deblocking-heavy and
+  10-bit content are at parity; mainstream 8-bit inter is **0.80x**. This release
+  is **1.23x-1.50x faster than 0.6**, every row a paired verdict, output unchanged.
 - **The decoder core is `#![forbid(unsafe_code)]`.** Every raw pointer and
   `target_feature` lives in one small crate, `rusty_h265-accel`, behind a
   runtime-dispatched seam. `--no-default-features` compiles a decoder with zero
@@ -56,31 +57,42 @@ Measured against **ffmpeg 8.1.2's native `hevc` decoder** -- hand-written
 assembly, the fastest widely-available software HEVC decoder, and a deliberately
 tougher bar than libde265.
 
-| stream | ffmpeg 8.1.2 | 0.5.0 | **0.6.0** | ratio | paired verdict |
-|---|---:|---:|---:|---:|---|
-| 720p 8-bit, mainstream inter | 267 ms | 492 ms | **447 ms** | 0.60x | 0/21, z = -4.58 |
-| 720p 10-bit, same content | 308 ms | 474 ms | **445 ms** | 0.69x | 0/21, z = -4.58 |
-| deblocking-heavy | 675 ms | 906 ms | **744 ms** | 0.91x | 1/20, z = -4.02 |
-| weighted prediction | 741 ms | 761 ms | **703 ms** | **1.05x** | **21/21, z = +4.58** |
+| stream | ffmpeg 8.1.2 | **this release** | ratio | paired verdict |
+|---|---:|---:|---:|---|
+| 720p 8-bit, mainstream inter | 175 ms | **226 ms** | 0.80x | 3/21, z = -3.27 |
+| 720p 10-bit, same content | 203 ms | **222 ms** | 0.94x | 7/21, z = -1.53 -- parity, not a verdict |
+| deblocking-heavy | 470 ms | **505 ms** | 1.02x | 13/21, z = +1.09 -- parity, not a verdict |
+| weighted prediction | 600 ms | **432 ms** | **1.37x** | **20/21, z = +4.15** |
 
-<sub>**We are between 1.05x FASTER and 1.67x slower than ffmpeg, and weighted
-prediction is the first stream we win outright.** Measured 2026-09-07 with
+<sub>**Between 1.37x FASTER and 1.25x slower than ffmpeg, and at parity on two of
+four streams.** Measured 2026-11-07 with
 [`tools/bench/codec-bench.ps1`](tools/bench/codec-bench.ps1): pinned to one core
-at High priority, arms ABBA-alternated, 21 pairs, paired win-rate with a z-score
--- every row is a verdict (|z| > 2), not noise. Both arms discard their output and
-report their own internal decode time (`decode_ms` here, `-benchmark rtime` for
-ffmpeg), which excludes process launch on both sides; frame counts are checked per
-arm before any timing is reported. The resolution floor -- ffmpeg measured against
-itself, same session -- is **0.992x**.</sub>
+at High priority, arms ABBA-alternated, 21 pairs, paired win-rate with a z-score.
+The ratio column is the median of the paired ratios, which is what the verdict
+rests on; the millisecond columns are per-arm medians and drift with the box.
+Both arms discard their output and report their own internal decode time
+(`decode_ms` here, `-benchmark rtime` for ffmpeg), which excludes process launch
+on both sides; frame counts are checked per arm before any timing is reported.
+The resolution floor -- ffmpeg measured against itself, same session -- is
+**1.023x**. The same comparison, run once earlier the same day under background
+load, gave 0.80x / 0.99x / 1.02x / 1.37x: the ratios replicate even when the
+milliseconds do not. On longer content the gap is similar: an x265-encoded 20 s
+720p30 clip reads **0.82x** and all-intra 720p **0.82x** (15/15 pairs each).</sub>
 
-<sub>**The 0.5.0 column was re-measured for this table rather than copied from the
-0.5.0 README, and it does not match what that README published** (0.51x / 0.51x /
-0.56x / 0.70x). Both binaries were run in the same session, on the same box, with
-one method, because that is the only way the two columns can be compared at all --
-a ratio whose denominator drifts more than the improvement is not evidence. Part
-of the apparent jump since 0.5.0 is therefore measurement basis, NOT this release.
-The part that IS this release is the release-over-release table below, which is a
-single-instrument delta and the number we stand behind.</sub>
+<sub>**This release is an instruction-count campaign.** Callgrind instruction
+counts, deterministic to ~20 K on 5 G, were the verdict for every step: **-34.0%**
+instructions on the x265 clip, **-36.7%** all-intra, **-26.3%** deblocking-heavy,
+every step bit-exact on all 147 conformance streams and all 6,183 picture hashes.
+Against the 0.6 binary on the wall clock, same session, 21 pairs each: **1.296x**
+mainstream inter (20/21, z = 4.15), **1.358x** 10-bit (21/21, z = 4.58),
+**1.233x** deblocking-heavy (20/21, z = 4.15), **1.291x** weighted prediction
+(20/21, z = 4.15); and on longer content (11/11 pairs each) **1.37x** on the x265
+clip and **1.50x** all-intra. What moved: SAO runs one whole-CTB kernel when all
+eight neighbours are usable; the inverse transform runs one block kernel per size
+with both passes inside the SIMD boundary; deblocking strength is written at parse
+time by the block that owns each edge, removing two frame-wide scans; intra
+reference gathering works in spans; motion compensation folds the uni/bi output
+stage into the last filter pass; and six per-4x4 maps became one packed record.</sub>
 
 <sub>**Release over release**, measured directly against the previous binary on the
 same box in the same session, both arms under the shipping allocator, 21 pairs each:
