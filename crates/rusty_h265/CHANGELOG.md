@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/Remade-With-Rust/rusty_h265/compare/rusty_h265-v0.6.2...rusty_h265-v0.7.0) - 2026-11-07
+
+### Other
+
+- performance tables for the instruction-count release
+- cargo fmt and clippy clean
+- [**breaking**] instruction-count campaign, 1.37-1.50x faster decode, bit-exact
+
 ## [0.6.2](https://github.com/Remade-With-Rust/rusty_h265/compare/rusty_h265-v0.6.1...rusty_h265-v0.6.2) - 2026-10-17
 
 ### Other
