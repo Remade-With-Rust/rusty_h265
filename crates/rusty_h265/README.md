@@ -62,7 +62,9 @@ dispatch, everything else for the portable x86-64 baseline.
 | all-intra 720p (`ipred_x24`) | 1,759 ms | 2,159 ms | **0.82×** | 0/15, z = −3.87 |
 
 FFmpeg measured against itself reads 0.95×, so differences inside ~5% are
-noise. The published standing before this release was ~0.5×.
+noise. On the JCT-VC streams the picture is wider: weighted prediction runs
+**1.37× faster** than FFmpeg (20/21 pairs, z = +4.15), and deblocking-heavy and
+10-bit content are at parity.
 
 ### What changed since 0.6
 
