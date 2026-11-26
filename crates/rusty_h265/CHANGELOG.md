@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3](https://github.com/Remade-With-Rust/rusty_h265/compare/rusty_h265-v0.7.2...rusty_h265-v0.7.3) - 2026-11-26
+
+### Added
+
+- *(decoder)* admit range-extensions profile streams that use no RExt tool ([#15](https://github.com/Remade-With-Rust/rusty_h265/pull/15))
+
 ## [0.7.2](https://github.com/Remade-With-Rust/rusty_h265/compare/rusty_h265-v0.7.1...rusty_h265-v0.7.2) - 2026-11-23
 
 ### Other
