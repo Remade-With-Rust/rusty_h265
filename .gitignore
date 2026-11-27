@@ -4,6 +4,8 @@ Cargo.lock
 *.yuv
 *.hevc
 *.bit
+# Small test fixtures (a few KB each) are tracked.
+!crates/rusty_h265/tests/fixtures/*.hevc
 !tools/**/*.ps1
 
 # The JCT-VC HEVC_v1 conformance suite: 381 MB of streams, fetched separately.
