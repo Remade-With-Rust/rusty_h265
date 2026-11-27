@@ -197,7 +197,8 @@ is not distributable.</sub>
 
 A complete HEVC **decoder**, written from the specification:
 
-- **Profiles:** Main, Main 10, Main Still Picture. 8-bit and 10-bit, 4:2:0.
+- **Profiles:** Main, Main 10, Main Still Picture. 8-bit and 10-bit, 4:2:0,
+  plus 4:0:0 (monochrome) -- the format HEIF uses for alpha planes.
 - **Coding tools:** the full CTU quadtree, all 35 intra modes including the
   strong-smoothing filter, inter prediction with merge/AMVP, weighted
   prediction, the DCT/DST inverse transforms with transform-skip, in-loop
