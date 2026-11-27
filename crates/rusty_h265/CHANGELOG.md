@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4](https://github.com/Remade-With-Rust/rusty_h265/compare/rusty_h265-v0.7.3...rusty_h265-v0.7.4) - 2026-11-27
+
+### Added
+
+- *(decoder)* decode 4:0:0 (monochrome) streams ([#17](https://github.com/Remade-With-Rust/rusty_h265/pull/17))
+
 ## [0.7.3](https://github.com/Remade-With-Rust/rusty_h265/compare/rusty_h265-v0.7.2...rusty_h265-v0.7.3) - 2026-11-26
 
 ### Added
