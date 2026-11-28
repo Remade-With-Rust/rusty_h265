@@ -197,8 +197,16 @@ is not distributable.</sub>
 
 A complete HEVC **decoder**, written from the specification:
 
-- **Profiles:** Main, Main 10, Main Still Picture. 8-bit and 10-bit, 4:2:0,
-  plus 4:0:0 (monochrome) -- the format HEIF uses for alpha planes.
+- **Profiles:** Main, Main 10, Main Still Picture, and the format range
+  extensions: 4:0:0, 4:2:0, 4:2:2 and 4:4:4 at 8, 10 and 12 bits (Main 4:2:2
+  10, Main 4:4:4, Main 12, the Intra and Still Picture variants, and the
+  high-throughput 4:4:4 profile within those bit depths). 4:0:0 is the format
+  HEIF uses for alpha planes; 4:2:2 is what cameras such as the Sony A7 IV write
+  into `.HIF` files.
+- **Range-extension tools:** transform-skip rotation and context, implicit and
+  explicit RDPCM, cross-component prediction, persistent Rice adaptation,
+  transform skip up to 32x32, chroma QP offset lists, high-precision weighted
+  prediction offsets, intra smoothing disabled, and the SAO offset scale.
 - **Coding tools:** the full CTU quadtree, all 35 intra modes including the
   strong-smoothing filter, inter prediction with merge/AMVP, weighted
   prediction, the DCT/DST inverse transforms with transform-skip, in-loop
@@ -206,9 +214,12 @@ A complete HEVC **decoder**, written from the specification:
   RPS/DPB machinery.
 - **Entropy:** CABAC, with the LPS-range and state-transition tables fused into
   a single branchless step.
-- **Not supported**, and rejected explicitly at the SPS rather than silently
-  mis-decoded: Range Extensions (12-bit, 4:2:2, 4:4:4), SHVC, 3D-HEVC, and
-  screen-content coding.
+- **Not supported**, and rejected explicitly by name rather than silently
+  mis-decoded: bit depths above 12 and the two range-extension tools that only
+  serve them (`extended_precision_processing_flag`,
+  `cabac_bypass_alignment_enabled_flag`, which FFmpeg does not implement
+  either), `separate_colour_plane_flag`, SHVC, 3D-HEVC, and screen-content
+  coding.
 
 ## Install
 
@@ -281,8 +292,8 @@ CI cannot go green having verified nothing.
 
 ## Roadmap
 
-- Range Extensions (12-bit, 4:2:2, 4:4:4) -- the profile check that rejects them
-  today is the placeholder.
+- The rest of the range extensions: 16-bit (extended precision processing)
+  and CABAC bypass alignment.
 - Multi-threaded decode: tiles and wavefronts are parsed, but the pipeline is
   single-threaded.
 - Closing the remaining gap to ffmpeg. MC, intra, deblocking and SAO are
